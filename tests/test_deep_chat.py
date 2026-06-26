@@ -20,6 +20,23 @@ def test_chat_agent_setting_precedence(tmp_path, monkeypatch):
     assert load_settings(tmp_path).chat_agent == "builtin"  # override back to builtin
 
 
+def test_interrupted_chat_message_keeps_work_and_is_resumable():
+    """A connection error must NOT wipe the turn to a one-line error: the partial text is kept
+    and a transient drop gets a soft 'type continue to resume' (vs. a real failure's hint)."""
+    from paperclaw import service
+
+    assert service._is_transient_chat_error(Exception("APIConnectionError: Connection error."))
+    assert service._is_transient_chat_error(Exception("Error code: 503 - temporarily unavailable"))
+    assert not service._is_transient_chat_error(KeyError("missing"))
+
+    parts = [{"kind": "text", "text": "Found MSE 0.33"}, {"kind": "tool", "name": "bash"}]
+    soft = service._interrupted_chat_message(parts, Exception("APIConnectionError: Connection error."), deep=True)
+    assert "Found MSE 0.33" in soft and "continue" in soft.lower()        # work kept + resumable
+    assert "set chat_agent" not in soft                                   # no scary config hint for a transient drop
+    hard = service._interrupted_chat_message(parts, KeyError("boom"), deep=True)
+    assert "Found MSE 0.33" in hard and "continue" in hard.lower()
+
+
 def test_split_content_separates_text_and_thinking():
     assert deep_chat._split_content("hello") == ("hello", "")
     text, thinking = deep_chat._split_content(

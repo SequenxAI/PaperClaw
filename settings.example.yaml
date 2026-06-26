@@ -1,9 +1,10 @@
 # PaperClaw configuration — copy this file to `settings.yaml` and fill in your keys.
 # Both the backend and the CLI read it on start (no commands needed). It is git-ignored,
-# so your keys never get committed. It overrides the in-app Settings.
+# so your keys never get committed. This project-dir file is a DEFAULT: a change you save
+# in the in-app Settings is written to $PAPERCLAW_HOME/settings.yaml and OVERRIDES it.
 #
 # Precedence (highest first):
-#   env vars > .env (cwd) > .env ($PAPERCLAW_HOME) > ./settings.yaml > $PAPERCLAW_HOME/settings.yaml
+#   env vars > .env (cwd) > .env ($PAPERCLAW_HOME) > $PAPERCLAW_HOME/settings.yaml > ./settings.yaml
 
 LLM:
   provider: anthropic           # anthropic | openai (any OpenAI-compatible endpoint)

@@ -267,15 +267,20 @@ def _resolve_ssh_target(store: Store, run_cfg):
     return SSHTarget.model_validate(targets[0])
 
 
-def _resolve_domain_codebase(store: Store, spec: str | None) -> Path | None:
-    """The reference-codebase dir of the domain this idea is pinned to (by name in
-    the spec), or None. Mirrors :func:`_resolve_venue`."""
-    if not spec:
-        return None
-    low = spec.lower()
-    for domain in store.list_domains():
-        if domain.name and domain.name.lower() in low:
-            return store.domain_codebase_path(domain.id)
+def _resolve_domain_codebase(store: Store, idea_id: str | None, spec: str | None) -> Path | None:
+    """The reference-codebase dir of a CONNECTED domain that actually HAS one, or None.
+    Honors EXPLICIT connections (`.domains.json`) first; with none recorded, name-matches a
+    domain by name in the spec (same precedence as `service.resolve_domain_ids_for_idea`).
+    Returns the first connected domain that has a downloaded codebase — so a connected domain
+    without a repo doesn't shadow one that has it."""
+    ids = store.get_idea_domain_ids(idea_id) if idea_id else None
+    if ids is None:  # never explicitly connected → fall back to name-matching the spec
+        low = (spec or "").lower()
+        ids = [d.id for d in store.list_domains() if d.name and d.name.lower() in low]
+    for did in ids:
+        cb = store.domain_codebase_path(did)  # None unless the dir exists AND is non-empty
+        if cb is not None:
+            return cb
     return None
 
 
@@ -307,8 +312,9 @@ async def _fallback_to_executed(settings, idea_ctx, plan, out_dir, run_cfg, note
 def _select_experiment_runner(settings, idea_ctx, plan, out_dir, run_cfg, target,
                               codebase_path=None):
     """Pick the experiment runner for a non-simulated run config:
-    ``cli`` → external headless agent CLI; ``ssh`` (target resolved) → remote
-    code; otherwise (``executed``) → our in-process agentic coding agent.
+    ``cli`` → external headless agent CLI; ``ssh`` (target resolved) → the agentic
+    coding agent driving bash ON THE REMOTE; otherwise (``executed``) → that same
+    agentic coding agent locally.
 
     **Fallback:** if ``cli`` is selected but its CLI binary (e.g. ``claude``) isn't on
     PATH, fall back to the in-process agentic runner (which drives our configured LLM)
@@ -327,9 +333,9 @@ def _select_experiment_runner(settings, idea_ctx, plan, out_dir, run_cfg, target
             settings, idea_ctx, plan, out_dir, run_cfg,
             f"\n⚠️ `{binary}` CLI not found — falling back to the in-process coding agent "
             "(uses the configured LLM).\n")
-    if target is not None:
-        return experiments.run_remote_code(settings, idea_ctx, plan, out_dir, run_cfg, target)
-    return agents.run_agentic_experiment(settings, idea_ctx, plan, out_dir, run_cfg)
+    # ssh mode (target resolved) runs the SAME agentic loop with a remote executor; local
+    # `executed` passes target=None. The SSH remote needs only its connection (no interpreter).
+    return agents.run_agentic_experiment(settings, idea_ctx, plan, out_dir, run_cfg, target=target)
 
 
 def _set_node_status(store: Store, idea_id: str, hid: str, status: str) -> None:
@@ -731,6 +737,7 @@ async def stream_iterative_research_events(
     experiment_mode: str | None = None,
     ssh_target_id: str | None = None,
     writing_style: str | None = None,
+    benchmark: str | None = None,
     use_reference_codebase: bool = True,
     fill_page: bool = False,
 ) -> AsyncIterator[dict]:
@@ -764,8 +771,8 @@ async def stream_iterative_research_events(
         yield {"type": "delta", "text": "\n[no domain linked — proceeding without domain grounding]\n"}
 
     idea_path = store.idea_path(idea_id)
-    run_cfg = store.get_run_config()
-    if experiment_mode:  # per-run override of the global experiment execution config
+    run_cfg = store.effective_run_config(idea_id)  # the idea's allocated resources over global
+    if experiment_mode:  # explicit per-run override (Auto settings / `auto run` flags) wins
         run_cfg = run_cfg.model_copy(update={
             "experiment_mode": experiment_mode,
             "ssh_target_id": ssh_target_id or run_cfg.ssh_target_id,
@@ -778,6 +785,24 @@ async def stream_iterative_research_events(
         base_ctx += ("\n\nDOMAIN.md (the idea's pinned domain — cite its Crucial Papers "
                      "by their real AUTHORS and YEAR, and use its datasets/benchmarks and "
                      f"venues; source: domains/{domain_id}/DOMAIN.md):\n{domain_md}")
+    # Benchmark template (per-run name, or the domain's sole benchmark): reframes the WHOLE
+    # loop — every step reads base_ctx, so the note propagates to plan/experiment/report/paper.
+    bench_md = _svc.resolve_benchmark(store, domain_id, benchmark)
+    bench_file = idea_path / ".benchmark.md"
+    if bench_md:
+        from paperclaw import benchmarks as _bench
+        from paperclaw.prompts.benchmarks import BENCHMARK_NOTE
+        base_ctx += BENCHMARK_NOTE.replace("{benchmark}", bench_md)
+        # persist so the DETACHED experiment job (which rebuilds context from disk via
+        # service.stream_hypothesis_experiment) reframes the experiment too, not just the
+        # in-process plan/report/paper steps that read base_ctx.
+        bench_file.write_text(bench_md, encoding="utf-8")
+        added = _bench.merge_into_refbib(idea_path / "ref.bib", bench_md)
+        yield {"type": "delta", "text":
+               f"\n[benchmark template in force — run only the new method on its fixed protocol; "
+               f"merged {added} cited reference(s) into ref.bib]\n"}
+    else:
+        bench_file.unlink(missing_ok=True)  # no benchmark this run — don't leave a stale one
     max_hypotheses = max(1, min(10, max_hypotheses))
 
     # Auto mode: ensure a hypothesis map exists (generate it up front if missing).

@@ -12,6 +12,7 @@
 运行*真实*实验，并写出一篇带引用、可编译的论文。
 
 [![arXiv](https://img.shields.io/badge/arXiv-2606.22610-b31b1b.svg)](https://arxiv.org/abs/2606.22610)
+[![Discord](https://img.shields.io/badge/Discord-Join%20the%20community-5865F2.svg?logo=discord&logoColor=white)](https://discord.gg/zHAe2y2ej)
 [![License: MIT](https://img.shields.io/badge/License-MIT-E11D48.svg)](../../LICENSE)
 ![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-FB923C.svg)
 ![Backend: FastAPI](https://img.shields.io/badge/Backend-FastAPI-009688.svg)
@@ -170,7 +171,7 @@ pip install -e ".[dev]"
 ```
 
 **配置** —— 本地模式按以下优先级读取配置（从高到低）：
-**环境变量 → `.env`（当前目录）→ `$PAPERCLAW_HOME` 下的 `.env` → `./settings.yaml`（项目目录）→ `$PAPERCLAW_HOME/settings.yaml`**。
+**环境变量 → `.env`（当前目录）→ `$PAPERCLAW_HOME` 下的 `.env` → `$PAPERCLAW_HOME/settings.yaml`→ `./settings.yaml`（项目目录）**。
 
 | 键 | 用途 |
 |---|---|

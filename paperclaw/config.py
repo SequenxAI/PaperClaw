@@ -127,26 +127,39 @@ def _parse_env_file(path: Path) -> dict[str, str]:
     return out
 
 
+def _deep_merge(base: dict, over: dict) -> dict:
+    """Recursively merge ``over`` onto ``base`` (``over`` wins); nested dicts merge per-key."""
+    out = dict(base)
+    for k, v in over.items():
+        out[k] = _deep_merge(out[k], v) if isinstance(v, dict) and isinstance(out.get(k), dict) else v
+    return out
+
+
 def load_settings(home: Path) -> LLMSettings:
     """Settings precedence (highest first): env vars > .env (cwd, then PaperClaw home)
-    > ``./settings.yaml`` (project working directory) > ``$PAPERCLAW_HOME/settings.yaml``.
+    > ``$PAPERCLAW_HOME/settings.yaml`` (the UI / ``settings set`` writes here)
+    > ``./settings.yaml`` (project working-directory DEFAULT).
 
-    The project-directory ``settings.yaml`` lets users configure backend AND CLI by
-    editing one file (copy ``settings.example.yaml``) instead of running ``settings set``;
-    it takes precedence over the persisted home file. YAML keeps the file commentable; a
-    legacy ``settings.json`` is still read (JSON is valid YAML). Recognized env keys:
-    PAPERCLAW_PROVIDER, PAPERCLAW_BASE_URL, PAPERCLAW_MODEL, PAPERCLAW_API_KEY — plus
-    ANTHROPIC_API_KEY / OPENAI_API_KEY as provider-matched fallbacks.
+    The project-directory ``settings.yaml`` is a no-command DEFAULT (copy
+    ``settings.example.yaml``) for first run / CLI from a repo; the persisted home file
+    OVERRIDES it, so a change made in the Settings UI actually takes effect (and each backend
+    instance uses its OWN ``$PAPERCLAW_HOME`` file rather than the shared cwd one). YAML keeps
+    the file commentable; a legacy ``settings.json`` is still read (JSON is valid YAML).
+    Recognized env keys: PAPERCLAW_PROVIDER, PAPERCLAW_BASE_URL, PAPERCLAW_MODEL,
+    PAPERCLAW_API_KEY — plus ANTHROPIC_API_KEY / OPENAI_API_KEY as provider-matched fallbacks.
     """
     settings = LLMSettings()
-    # A settings.yaml in the working directory is the no-command config; it overrides the
-    # persisted $PAPERCLAW_HOME/settings.yaml (written by the UI / `settings set`).
-    cfg_path = _resolve_settings_file(Path.cwd()) or _resolve_settings_file(home)
-    if cfg_path is not None:
-        try:
-            settings = _settings_from_config(yaml.safe_load(cfg_path.read_text()) or {})
-        except Exception:
-            pass
+    # Merge cwd ./settings.* (DEFAULT, lower) under $PAPERCLAW_HOME/settings.* (UI-written,
+    # higher) so the persisted home config wins. If home == cwd they resolve to one file.
+    merged: dict = {}
+    for path in (_resolve_settings_file(Path.cwd()), _resolve_settings_file(home)):
+        if path is not None:
+            try:
+                merged = _deep_merge(merged, yaml.safe_load(path.read_text()) or {})
+            except Exception:
+                pass
+    if merged:
+        settings = _settings_from_config(merged)
 
     env: dict[str, str] = {}
     env.update(_parse_env_file(home / ".env"))

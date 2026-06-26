@@ -20,8 +20,11 @@ backend's permissions — for a trusted, self-hosted deployment (no container).
 """
 
 import asyncio
+import posixpath
 import re
+import shlex
 import subprocess
+import uuid
 from pathlib import Path
 from typing import AsyncIterator
 
@@ -32,6 +35,7 @@ from paperclaw.experiments import (
     _load_results,
     _render_failure_md,
     _render_results_md,
+    _ssh_base,
 )
 from paperclaw.prompts.pipeline import AGENT_EXPERIMENT_SYSTEM
 from paperclaw.server.models import RunConfig
@@ -88,16 +92,18 @@ def _exec_bash(command: str, out_dir: Path, timeout: int) -> tuple[int, str]:
         return 1, f"[failed to run: {exc}]"
 
 
-async def _stream_bash(command: str, out_dir: Path, log: Path):
-    """Async-run a shell command with NO timeout, appending output to *log* live and
-    yielding ("chunk", text) as each line arrives, then ("done", rc, full_output).
-    This is what makes a long-running command (e.g. multi-hour training) monitorable."""
+async def _stream_argv(argv: list[str], cwd: Path | None, log: Path, header: str):
+    """Async-run *argv* with NO timeout, appending output to *log* live and yielding
+    ("chunk", text) as each line arrives, then ("done", rc, full_output). The same
+    streaming logic drives either a local ``bash -c …`` or a remote ``ssh … bash -lc …``,
+    so a long-running command (e.g. multi-hour training) stays monitorable either way.
+    *header* is the human-readable command echoed into the log."""
     proc = await asyncio.create_subprocess_exec(
-        "bash", "-c", command, cwd=str(out_dir),
+        *argv, cwd=str(cwd) if cwd is not None else None,
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
     chunks: list[str] = []
     with log.open("a", encoding="utf-8") as f:
-        f.write(f"$ {command}\n"); f.flush()
+        f.write(f"$ {header}\n"); f.flush()
         assert proc.stdout is not None
         while True:
             line = await proc.stdout.readline()
@@ -109,6 +115,85 @@ async def _stream_bash(command: str, out_dir: Path, log: Path):
             yield ("chunk", text)
     rc = await proc.wait()
     yield ("done", rc, "".join(chunks))
+
+
+class _LocalExec:
+    """Run the agent's bash/file actions on the LOCAL host (the default)."""
+
+    provenance = "agent"
+
+    def __init__(self, out_dir: Path):
+        self.out_dir = out_dir
+
+    def setup(self) -> str | None:
+        return None  # always ready locally
+
+    def sync_file(self, rel: str) -> None:
+        pass  # files already live in out_dir
+
+    def collect(self) -> None:
+        pass  # results.json + figures already in out_dir
+
+    def stream(self, command: str, log: Path):
+        return _stream_argv(["bash", "-c", command], self.out_dir, log, command)
+
+
+class _RemoteExec:
+    """Run the agent's bash on an SSH remote, mirroring authored files up and pulling
+    ``results.json`` + figures back. The agent writes code LOCALLY (so it shows in the
+    Files tab); each write is pushed to a fresh remote working dir, bash runs there in a
+    login shell (picking up the remote's conda/PATH — no configured interpreter), and the
+    deliverables are scp'd back. The remote dir is left in place for inspection/re-pull."""
+
+    provenance = "ssh"
+
+    def __init__(self, out_dir: Path, target):
+        self.out_dir = out_dir
+        self.target = target
+        self.label = f"{target.user}@{target.host}"
+        self.remote = f"/tmp/paperclaw_{uuid.uuid4().hex[:10]}"
+        self._ssh = _ssh_base(target)
+        self._scp = _ssh_base(target, scp=True)
+
+    @staticmethod
+    def _run(argv: list[str], timeout: int):
+        """Best-effort ssh/scp: never raise (a missing ssh/scp binary → FileNotFoundError,
+        a hung transfer → TimeoutExpired); return the CompletedProcess or None on failure."""
+        try:
+            return subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+        except (OSError, subprocess.SubprocessError):
+            return None
+
+    def setup(self) -> str | None:
+        """Create the remote working dir; return a human error string if the remote is
+        unreachable (so the runner can fail cleanly up front instead of burning rounds)."""
+        p = self._run(self._ssh + [self.label, f"mkdir -p {shlex.quote(self.remote)}"], 30)
+        if p is None:
+            return (f"could not reach the SSH remote {self.label} — is `ssh` installed and "
+                    "the host reachable with the configured key?")
+        if p.returncode != 0:
+            return f"SSH remote {self.label} refused the connection: {(p.stderr or p.stdout or '').strip()[:300]}"
+        return None
+
+    def sync_file(self, rel: str) -> None:
+        local = self.out_dir / rel
+        if not local.is_file():
+            return
+        remote_path = posixpath.join(self.remote, rel.replace("\\", "/"))
+        parent = posixpath.dirname(remote_path)
+        if parent and parent != self.remote:
+            self._run(self._ssh + [self.label, f"mkdir -p {shlex.quote(parent)}"], 30)
+        self._run(self._scp + [str(local), f"{self.label}:{remote_path}"], 300)
+
+    def collect(self) -> None:
+        # best-effort — the deliverables may not exist yet
+        self._run(self._scp + [f"{self.label}:{self.remote}/results.json", f"{self.out_dir}/"], 120)
+        self._run(self._scp + [f"{self.label}:{self.remote}/*.png", f"{self.out_dir}/"], 300)
+
+    def stream(self, command: str, log: Path):
+        argv = self._ssh + [self.label,
+                            f"cd {shlex.quote(self.remote)} && bash -lc {shlex.quote(command)}"]
+        return _stream_argv(argv, None, log, command)
 
 
 def _write_file(out_dir: Path, rel: str, content: str) -> str:
@@ -133,17 +218,36 @@ async def run_agentic_experiment(
     plan: str,
     out_dir: Path,
     run_config: RunConfig,
+    target=None,
 ) -> AsyncIterator[dict]:
     """Multi-file agentic experiment runner. Yields delta/thinking/status events +
     a terminal ``result`` (markdown / provenance / figures / error), like the other
-    runners."""
+    runners.
+
+    When *target* (an ``SSHTarget``) is given, the agent still authors code LOCALLY (so
+    it shows in the Files tab), but every ``bash`` step runs on the remote and the
+    authored files are pushed up / ``results.json`` + figures pulled back — i.e. ``ssh``
+    mode is just this loop with a remote executor (no interpreter / extra settings)."""
     out_dir.mkdir(parents=True, exist_ok=True)
     log = out_dir / "stdout.log"
     log.write_text("", encoding="utf-8")
+    executor = _RemoteExec(out_dir, target) if target is not None else _LocalExec(out_dir)
+    setup_err = await asyncio.to_thread(executor.setup)
+    if setup_err:  # remote unreachable — fail cleanly instead of crashing / burning rounds
+        yield {"type": "result", "result": {
+            "markdown": _render_failure_md(setup_err, 0), "provenance": executor.provenance,
+            "figures": [], "attempts": 0, "error": setup_err}}
+        return
+    remote_note = (
+        f"\n\nNOTE: you are operating on a REMOTE machine ({executor.label}) over SSH; the "
+        "working directory lives on that host. Set up the environment and run everything with "
+        "bash there (a login shell, so conda/venv are available), and write results.json in it."
+        if target is not None else "")
     conversation = [{"role": "user", "content":
                      f"IDEA spec:\n{idea_ctx}\n\nResearch plan:\n{plan}\n\n"
                      "Explore the working directory, build the experiment as a clean "
-                     "multi-file codebase, run it on the REAL data, and write results.json."}]
+                     "multi-file codebase, run it on the REAL data, and write results.json."
+                     + remote_note}]
 
     rnd = 0
     for rnd in range(1, _AGENT_MAX_ROUNDS + 1):
@@ -158,7 +262,7 @@ async def run_agentic_experiment(
                     yield {"type": "delta", "text": ev["text"]}
         except (llm.LLMNotConfigured, llm.LLMError) as exc:
             yield {"type": "result", "result": {
-                "markdown": _render_failure_md(str(exc), rnd), "provenance": "agent",
+                "markdown": _render_failure_md(str(exc), rnd), "provenance": executor.provenance,
                 "figures": [], "attempts": rnd, "error": str(exc)}}
             return
         conversation.append({"role": "assistant", "content": raw})
@@ -171,11 +275,13 @@ async def run_agentic_experiment(
         for kind, path, body in actions:
             if kind == "write":
                 msg = _write_file(out_dir, path, body.strip("\n") + "\n")
+                await asyncio.to_thread(executor.sync_file, path)
                 yield {"type": "status", "text": f"📝 {msg}\n"}
                 observations.append(msg)
             elif kind == "patch":
                 try:
                     msg = _apply_patch.apply_patch(out_dir, path, body)
+                    await asyncio.to_thread(executor.sync_file, path)
                 except (ValueError, FileNotFoundError, OSError) as exc:
                     msg = f"Error patching {path}: {exc}"
                 yield {"type": "status", "text": f"🩹 {msg}\n"}
@@ -185,7 +291,7 @@ async def run_agentic_experiment(
                 first = cmd.splitlines()[0] if cmd else ""
                 yield {"type": "status", "text": f"▶ $ {first}\n"}
                 rc, out = 0, ""
-                async for kind, *rest in _stream_bash(cmd, out_dir, log):
+                async for kind, *rest in executor.stream(cmd, log):
                     if kind == "chunk":
                         yield {"type": "delta", "text": rest[0]}
                     else:
@@ -193,10 +299,11 @@ async def run_agentic_experiment(
                 observations.append(f"$ {cmd}\n(exit {rc})\n{out[-_STDERR_TAIL:]}")
         conversation.append({"role": "user", "content": "\n\n".join(observations)})
 
+    await asyncio.to_thread(executor.collect)  # pull results.json + figures (no-op locally)
     results = _load_results(out_dir)
     figures = sorted(p.name for p in out_dir.glob("*.png"))
     stdout = log.read_text(encoding="utf-8") if log.is_file() else ""
     yield {"type": "result", "result": {
         "markdown": _render_results_md(results, stdout, figures),
-        "provenance": "agent", "figures": figures, "attempts": rnd,
+        "provenance": executor.provenance, "figures": figures, "attempts": rnd,
         "error": None if results else "agent finished without writing results.json"}}

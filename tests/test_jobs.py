@@ -93,7 +93,8 @@ def test_start_spawns_detached(tmp_path, monkeypatch):
 
 def test_start_pins_run_override(tmp_path, monkeypatch):
     """A per-run override (auto-run experiment mode / SSH target / codebase toggle) is
-    pinned into the job dir so the detached child uses it; a plain start clears it."""
+    pinned into the job dir so the detached child uses it; a plain start pins the IDEA's
+    allocated resources (its effective run config)."""
     from paperclaw.server.models import RunConfig
     store, idea_id = _idea_with_hyp(tmp_path)
     hdir = store.idea_path(idea_id) / "hypotheses" / "H1"
@@ -111,9 +112,12 @@ def test_start_pins_run_override(tmp_path, monkeypatch):
     assert ov["runConfig"].ssh_target_id == "gpu1"
     assert ov["useReferenceCodebase"] is False
 
-    # finish the job so the next start is a fresh run (not a re-attach), which—with no
-    # override—must CLEAR the stale pin and fall back to the global config.
+    # finish the job so the next start is a fresh run (not a re-attach). With NO explicit
+    # override, a plain start now pins the idea's ALLOCATED resources (effective run config).
     job = json.loads((hdir / "job.json").read_text())
     (hdir / "job.json").write_text(json.dumps({**job, "status": "done"}))
+    store.set_idea_resources(idea_id, {"experimentMode": "ssh", "sshTargetId": "gpu2"})
     jobs.start_experiment_job(store, idea_id, "H1")
-    assert jobs.read_run_override(hdir) is None
+    ov2 = jobs.read_run_override(hdir)
+    assert ov2 is not None and ov2["runConfig"].experiment_mode == "ssh"  # idea allocation used
+    assert ov2["runConfig"].ssh_target_id == "gpu2"

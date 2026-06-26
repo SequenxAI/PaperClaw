@@ -19,9 +19,16 @@ interface Props {
  *  streamed output) for a running action — domain creation, idea brainstorm, or an
  *  auto run. Independent of the idea context so it works during any of them. */
 export default function FeedbackPanel({ open, title, entries, running, onClose }: Props) {
-  const bottomRef = useRef<HTMLDivElement>(null)
+  const feedRef = useRef<HTMLDivElement>(null)
+  // Stick to the bottom as new content streams in — but ONLY if the user is already near
+  // the bottom. If they scrolled UP to read, don't yank them back down (and scroll the
+  // feed's OWN container, never the page).
   useEffect(() => {
-    if (open) bottomRef.current?.scrollIntoView({ block: 'end' })
+    if (!open) return
+    const el = feedRef.current
+    if (!el) return
+    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80
+    if (nearBottom) el.scrollTop = el.scrollHeight
   }, [entries, open])
 
   if (!open) return null
@@ -33,7 +40,7 @@ export default function FeedbackPanel({ open, title, entries, running, onClose }
         </span>
         <button className={s.close} onClick={onClose} title="Hide">✕</button>
       </div>
-      <div className={s.feed}>
+      <div className={s.feed} ref={feedRef}>
         {entries.length === 0 && (
           <div className={s.empty}>{running ? 'Waiting for the agent…' : 'No activity.'}</div>
         )}
@@ -50,7 +57,6 @@ export default function FeedbackPanel({ open, title, entries, running, onClose }
           )
         ))}
         {running && <span className={s.cursor} />}
-        <div ref={bottomRef} style={{ height: 1 }} />
       </div>
     </div>
   )

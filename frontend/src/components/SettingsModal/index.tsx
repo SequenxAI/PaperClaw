@@ -369,7 +369,7 @@ export default function SettingsModal({ onClose }: Props) {
                       {run.experimentMode === 'executed'
                         ? '⚠ Runs model-written Python as a subprocess on the backend host (no timeout — long runs allowed). Use on a trusted, self-hosted box.'
                         : run.experimentMode === 'ssh'
-                        ? '🧪 BETA — not fully tested. Pushes & runs model-written Python on the selected SSH remote, then pulls results/figures back.'
+                        ? '🧪 BETA — runs the agentic coding agent over SSH: it sets up the env and runs everything with bash on the selected remote (code is authored locally; results/figures are pulled back). Needs only the SSH remote — no interpreter or other settings.'
                         : run.experimentMode === 'cli'
                         ? '✓ Default. Shells out to an external headless coding-agent CLI (claude / opencode / openhands) in the experiment dir and streams its output. The CLI uses its own auth/model.'
                         : '⚠ NOT real data — the model NARRATES plausible (fabricated) numbers; nothing runs. Avoid for real research — use only for a quick demo.'}
@@ -414,13 +414,13 @@ export default function SettingsModal({ onClose }: Props) {
                     </div>
                   )}
 
-                  {(run.experimentMode === 'executed' || run.experimentMode === 'ssh') && (
+                  {run.experimentMode === 'executed' && (
                     <div className={s.field}>
                       <label className={s.label}>Python interpreter</label>
                       <input
                         className={s.input}
                         value={run.pythonPath ?? ''}
-                        placeholder={run.experimentMode === 'ssh' ? '(remote default: python3)' : '(backend default interpreter)'}
+                        placeholder="(backend default interpreter)"
                         onChange={e => setRun({ ...run, pythonPath: e.target.value })}
                       />
                       <span className={s.hint}>Path to a python/conda env with your research libraries (torch, numpy…).</span>

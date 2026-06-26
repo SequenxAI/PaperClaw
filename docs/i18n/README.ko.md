@@ -12,6 +12,7 @@
 아이디어를 발상하며, *실제* 실험을 수행하고, 인용이 포함된 컴파일된 논문을 작성합니다.
 
 [![arXiv](https://img.shields.io/badge/arXiv-2606.22610-b31b1b.svg)](https://arxiv.org/abs/2606.22610)
+[![Discord](https://img.shields.io/badge/Discord-Join%20the%20community-5865F2.svg?logo=discord&logoColor=white)](https://discord.gg/zHAe2y2ej)
 [![License: MIT](https://img.shields.io/badge/License-MIT-E11D48.svg)](../../LICENSE)
 ![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-FB923C.svg)
 ![Backend: FastAPI](https://img.shields.io/badge/Backend-FastAPI-009688.svg)
@@ -172,7 +173,7 @@ pip install -e ".[dev]"
 ```
 
 **구성** — 로컬 모드는 다음 우선순위(높은 순)로 설정을 읽습니다:
-**환경 변수 → `.env`(현재 디렉터리) → `$PAPERCLAW_HOME` 의 `.env` → `./settings.yaml` (프로젝트 디렉터리) → `$PAPERCLAW_HOME/settings.yaml`**.
+**환경 변수 → `.env`(현재 디렉터리) → `$PAPERCLAW_HOME` 의 `.env` → `$PAPERCLAW_HOME/settings.yaml` → `./settings.yaml` (프로젝트 디렉터리)**.
 
 | 키 | 용도 |
 |---|---|

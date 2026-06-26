@@ -12,9 +12,12 @@ from typing import Any, Callable
 
 from paperclaw.tools import (
     apply_patch,
+    bash,
+    bash_output,
     cite,
     fetch_url,
     hypothesis,
+    list_exp_resources,
     list_files,
     openalex_search,
     read_file,
@@ -26,11 +29,14 @@ from paperclaw.tools import (
 
 ALL_TOOLS: list[dict[str, Any]] = [
     apply_patch.SCHEMA,
+    bash.SCHEMA,
+    bash_output.SCHEMA,
     read_file.SCHEMA,
     read_image.SCHEMA,
     read_pdf.SCHEMA,
     write_file.SCHEMA,
     list_files.SCHEMA,
+    list_exp_resources.SCHEMA,
     openalex_search.SCHEMA,
     web_search.SCHEMA,
     fetch_url.SCHEMA,
@@ -45,11 +51,14 @@ ALL_TOOLS: list[dict[str, Any]] = [
 # can see the figure. The tool loops handle both.
 EXECUTORS: dict[str, Callable[[Path, dict[str, Any]], "str | list[dict[str, Any]]"]] = {
     "apply_patch":        apply_patch.execute,
+    "bash":               bash.execute,
+    "bash_output":        bash_output.execute,
     "read_file":          read_file.execute,
     "read_image":         read_image.execute,
     "read_pdf":           read_pdf.execute,
     "write_file":         write_file.execute,
     "list_files":         list_files.execute,
+    "list_exp_resources": list_exp_resources.execute,
     "openalex_search":    openalex_search.execute,
     "web_search":         web_search.execute,
     "fetch_url":          fetch_url.execute,

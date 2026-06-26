@@ -250,6 +250,24 @@ def test_domain_grounded_brainstorm_creates_drafts(tmp_path, monkeypatch):
     assert seeds[0]["draft"].startswith("# Diffusion Heads")
 
 
+def test_existing_idea_labels_includes_pinned_ideas_and_fuzzy_ranks(tmp_path):
+    """Brainstorm dedup pool now includes PINNED IDEAS (not just seeds — that was the
+    cause of regenerated duplicates) and is fuzzy-ranked by relevance to the query."""
+    from paperclaw import service
+    from paperclaw.server.store import Store
+
+    store = Store(tmp_path)
+    store.add_idea("Diffusion models for time series forecasting")
+    store.add_idea("Graph neural networks for traffic")
+    store.add_seed("Transformer time series anomaly detection")
+
+    labels = service._existing_idea_labels(store, "time series diffusion", limit=20)
+    assert "Diffusion models for time series forecasting" in labels      # pinned idea included
+    assert "Transformer time series anomaly detection" in labels          # seed included
+    assert labels[0] == "Diffusion models for time series forecasting"    # most relevant first
+    assert len(service._existing_idea_labels(store, "anything", limit=1)) == 1  # cap respected
+
+
 def test_brainstorm_stream_emits_thinking_and_drafts(tmp_path, monkeypatch):
     """The /generate-stream SSE endpoint streams the model live — thinking + the
     drafts as they're written — instead of only a status then the final list."""

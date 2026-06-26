@@ -335,7 +335,8 @@ def test_auto_run_start_route(tmp_path, monkeypatch):
     assert called == {"topic": "gen", "idea_id": None,
                       "target_positive": 3, "max_hypotheses": 5, "page_limit": 7, "max_depth": 3,
                       "experiment_mode": None, "ssh_target_id": None,
-                      "writing_style": None, "use_reference_codebase": True, "fill_page": False}
+                      "writing_style": None, "benchmark": None,
+                      "use_reference_codebase": True, "fill_page": False}
 
     # the per-idea variant forwards ideaId + the per-run overrides
     called.clear()

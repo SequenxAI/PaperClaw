@@ -13,6 +13,12 @@ export interface WritingStyle {
   title: string
 }
 
+export interface Benchmark {
+  name: string
+  scope: 'global' | 'domain'
+  title: string
+}
+
 export type ExperimentJobStatus = 'running' | 'done' | 'error' | 'cancelled' | 'interrupted'
 
 export interface ExperimentJob {
@@ -67,11 +73,36 @@ export interface Idea {
   description?: string
   createdAt: number
   isActive: boolean
+  color?: string | null   // sidebar flag: 'green' | 'yellow' | 'grey' | null
 }
 
 export interface IdeaSpec {
   ideaId: string
   content: string
+}
+
+// The domains an idea is connected to (an idea may connect to several).
+export interface IdeaDomains {
+  ideaId: string
+  domainIds: string[]
+}
+
+// An idea's allocated experiment resources (compute + the active LLM, read-only).
+export interface IdeaResources {
+  ideaId: string
+  experimentMode: 'simulated' | 'executed' | 'ssh' | 'cli' | null
+  sshTargetId: string | null
+  useReferenceCodebase: boolean
+  sshTargets: SSHTarget[]
+  llmProvider: string | null
+  llmModel: string | null
+  llmBaseUrl: string | null
+  llmKeyConfigured: boolean
+}
+export interface IdeaResourcesUpdate {
+  experimentMode?: string | null
+  sshTargetId?: string | null
+  useReferenceCodebase?: boolean
 }
 
 export interface PaperContent {
@@ -124,9 +155,9 @@ export interface Message {
   createdIdeaId?: string | null
   createdDomainId?: string | null
   question?: ChatQuestion | null
-  thinking?: string | null     // streamed reasoning (UI-only, not persisted)
-  parts?: MessagePart[]        // interleaved text + tool timeline (UI-only)
-  todos?: TodoItem[]           // the agent's plan/checklist (UI-only)
+  thinking?: string | null     // streamed reasoning (persisted with the message)
+  parts?: MessagePart[]        // interleaved text + tool timeline (persisted when there were tool calls)
+  todos?: TodoItem[]           // the agent's plan/checklist (persisted with the message)
 }
 
 export type ResourceType = 'paper' | 'link' | 'dataset' | 'code'

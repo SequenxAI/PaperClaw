@@ -12,6 +12,7 @@
 une idée, exécute de *vraies* expériences et rédige un article cité et compilé.
 
 [![arXiv](https://img.shields.io/badge/arXiv-2606.22610-b31b1b.svg)](https://arxiv.org/abs/2606.22610)
+[![Discord](https://img.shields.io/badge/Discord-Join%20the%20community-5865F2.svg?logo=discord&logoColor=white)](https://discord.gg/zHAe2y2ej)
 [![License: MIT](https://img.shields.io/badge/License-MIT-E11D48.svg)](../../LICENSE)
 ![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-FB923C.svg)
 ![Backend: FastAPI](https://img.shields.io/badge/Backend-FastAPI-009688.svg)
@@ -179,7 +180,7 @@ pip install -e ".[dev]"
 ```
 
 **Configurer** — le mode local lit la configuration avec cette priorité (de la plus haute à la plus basse) :
-**variables d'environnement → `.env` (cwd) → `.env` dans `$PAPERCLAW_HOME` → `./settings.yaml` (racine du projet) → `$PAPERCLAW_HOME/settings.yaml`**.
+**variables d'environnement → `.env` (cwd) → `.env` dans `$PAPERCLAW_HOME` → `$PAPERCLAW_HOME/settings.yaml` → `./settings.yaml` (racine du projet)**.
 
 | Clé | But |
 |---|---|

@@ -12,6 +12,7 @@
 an idea, runs *real* experiments, and writes a cited, compiled paper.
 
 [![arXiv](https://img.shields.io/badge/arXiv-2606.22610-b31b1b.svg)](https://arxiv.org/abs/2606.22610)
+[![Discord](https://img.shields.io/badge/Discord-Join%20the%20community-5865F2.svg?logo=discord&logoColor=white)](https://discord.gg/zHAe2y2ej)
 [![License: MIT](https://img.shields.io/badge/License-MIT-E11D48.svg)](LICENSE)
 ![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-FB923C.svg)
 ![Backend: FastAPI](https://img.shields.io/badge/Backend-FastAPI-009688.svg)
@@ -99,7 +100,7 @@ flowchart LR
 PaperClaw runs in two modes — pick one (they share the same backend and `saves/` data, so
 you can switch freely).
 
-**Quickest setup (no commands):** copy `settings.example.yaml` → `settings.yaml` in the project directory and fill in your keys — both the backend and the CLI read it on start (it overrides the in-app Settings). It's YAML, so you can `#`-comment the options:
+**Quickest setup (no commands):** copy `settings.example.yaml` → `settings.yaml` in the project directory and fill in your keys — both the backend and the CLI read it on start as the **default** config. It's YAML, so you can `#`-comment the options:
 
 ```yaml
 LLM:
@@ -174,9 +175,9 @@ pip install -e ".[dev]"
 ```
 
 **Configure** — local mode reads config with this precedence (highest first):
-**environment variables → `.env` (cwd) → `.env` in `$PAPERCLAW_HOME` → `./settings.yaml` (project
-dir) → `$PAPERCLAW_HOME/settings.yaml`**. The simplest path is the grouped `settings.yaml`
-above; the env keys below override individual fields:
+**environment variables → `.env` (cwd) → `.env` in `$PAPERCLAW_HOME` → `$PAPERCLAW_HOME/settings.yaml`
+(written by the Settings UI / `settings set`) → `./settings.yaml` (project-dir default)**. So a change
+saved in the Settings UI persists and overrides the project-dir default. The env keys below override individual fields:
 
 | Key | Purpose |
 |---|---|

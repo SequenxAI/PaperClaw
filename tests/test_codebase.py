@@ -87,8 +87,9 @@ def test_runner_links_codebase_and_notes_it(tmp_path, monkeypatch):
 
     captured = {}
 
-    def fake_agentic(settings, idea_ctx, plan, out_dir, run_cfg):
+    def fake_agentic(settings, idea_ctx, plan, out_dir, run_cfg, target=None):
         captured["ctx"] = idea_ctx
+        captured["target"] = target
         yield {"type": "done"}
 
     monkeypatch.setattr(agents, "run_agentic_experiment", fake_agentic)
@@ -97,3 +98,4 @@ def test_runner_links_codebase_and_notes_it(tmp_path, monkeypatch):
                                       RunConfig(experimentMode="executed"), None, cb))
     assert (out / "reference").exists()                 # linked in
     assert "./reference" in captured["ctx"]             # told to reuse it
+    assert captured["target"] is None                   # local executed → no remote

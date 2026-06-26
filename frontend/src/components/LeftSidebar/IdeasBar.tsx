@@ -13,7 +13,10 @@ interface Props {
   onRemove: (id: string) => void
   onReveal: (id: string) => void
   onDuplicate: (id: string) => void
+  onSetColor: (id: string, color: string | null) => void
 }
+
+const FLAG_COLORS: Record<string, string> = { green: '#22c55e', yellow: '#eab308', grey: '#9ca3af' }
 
 interface CtxMenu {
   ideaId: string
@@ -22,7 +25,7 @@ interface CtxMenu {
 }
 
 export default function IdeasBar({
-  ideas, streamingContexts, runningAutoIdeas, isOpen, onToggle, onAdd, onSetActive, onRemove, onReveal, onDuplicate
+  ideas, streamingContexts, runningAutoIdeas, isOpen, onToggle, onAdd, onSetActive, onRemove, onReveal, onDuplicate, onSetColor
 }: Props) {
   const [ctxMenu, setCtxMenu] = useState<CtxMenu | null>(null)
 
@@ -114,7 +117,9 @@ export default function IdeasBar({
                 >
                   {runningAutoIdeas.has(idea.id)
                     ? <span className={s.topicBulletRunning} title="Auto run in progress…" />
-                    : <span className={s.topicBullet} />}
+                    : <span className={s.topicBullet}
+                            style={idea.color ? { background: FLAG_COLORS[idea.color] } : undefined}
+                            title={idea.color ? `flagged ${idea.color}` : undefined} />}
                   <span className={s.topicName} title={idea.title}>{idea.title}</span>
                   {streamingContexts.has(idea.id) && (
                     <span className={s.itemSpinner} title="Generating…" />
@@ -151,6 +156,15 @@ export default function IdeasBar({
           >
             📂 Open in file explorer
           </button>
+          <div className={s.ctxFlags}>
+            <span className={s.ctxFlagLabel}>Flag:</span>
+            {(['green', 'yellow', 'grey'] as const).map(c => (
+              <button key={c} className={s.ctxFlagDot} style={{ background: FLAG_COLORS[c] }}
+                      title={c} onClick={() => { onSetColor(ctxMenu.ideaId, c); setCtxMenu(null) }} />
+            ))}
+            <button className={s.ctxFlagClear} title="clear flag"
+                    onClick={() => { onSetColor(ctxMenu.ideaId, null); setCtxMenu(null) }}>✕</button>
+          </div>
           <button
             className={`${s.ctxItem} ${s.ctxItemDanger}`}
             onClick={() => { onRemove(ctxMenu.ideaId); setCtxMenu(null) }}

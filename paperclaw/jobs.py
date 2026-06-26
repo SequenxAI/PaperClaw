@@ -135,12 +135,15 @@ def start_experiment_job(store, idea_id: str, hid: str, *,
     *run_config* (with *use_reference_codebase*) pins the EFFECTIVE experiment config
     for THIS job — a per-run override from an auto run (experiment mode / SSH target /
     reference-codebase reuse) — into ``.run_override.json`` so the detached child uses
-    it instead of re-reading the global config. None ⇒ clear any stale override and fall
-    back to the global config (the on-demand single-experiment path)."""
+    it instead of re-reading the global config. None ⇒ use the IDEA's allocated resources
+    (`store.effective_run_config`: the idea's pinned compute/GPU over the global config), so
+    a manual run from the Hypotheses tab honours the idea's resource allocation too."""
     hdir = _hyp_dir(store, idea_id, hid)
     if hdir is None:
         raise FileNotFoundError("Idea not found")
     hdir.mkdir(parents=True, exist_ok=True)
+    if run_config is None:  # honour the idea's allocated resources (else global)
+        run_config = store.effective_run_config(idea_id)
 
     existing = _read_job(hdir)
     if existing and existing.get("status") == "running" and _pid_alive(existing.get("pid")):

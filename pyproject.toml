@@ -1,6 +1,6 @@
 [project]
 name = "paperclaw"
-version = "0.67.3"
+version = "0.68.0"
 description = "PaperClaw — AI-powered multi-platform research application"
 requires-python = ">=3.11"
 dependencies = [

@@ -1127,3 +1127,103 @@
   background: var(--bg-input);
   cursor: pointer;
 }
+
+/* Idea → domain connector (Spec tab) */
+.domainConnector {
+  margin-bottom: 12px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--border-faint);
+}
+.domainRow {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.domainLabel {
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+.domainNone {
+  font-size: var(--fs-xs);
+  color: var(--text-tertiary, var(--text-secondary));
+  font-style: italic;
+}
+.domainChip {
+  font-size: var(--fs-xs);
+  padding: 2px 8px;
+  border-radius: 10px;
+  background: var(--accent-soft, var(--bg-input));
+  border: 1px solid var(--border-subtle);
+  color: var(--text-primary);
+}
+.domainEdit {
+  margin-left: auto;
+  font-size: var(--fs-xs);
+  padding: 2px 8px;
+  border-radius: 6px;
+  color: var(--text-secondary);
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-input);
+  cursor: pointer;
+}
+.domainPicker {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 8px;
+  max-height: 180px;
+  overflow-y: auto;
+}
+.domainOption {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--fs-sm);
+  color: var(--text-primary);
+  cursor: pointer;
+}
+
+/* Per-idea resource allocation (Spec → 📦 Resources) */
+.resEditor {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 4px 2px;
+}
+.resHint {
+  font-size: var(--fs-xs);
+  color: var(--text-secondary);
+  margin: 0;
+}
+.resField {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.resLabel {
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+.resCheck {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: var(--fs-sm);
+  color: var(--text-primary);
+  cursor: pointer;
+}
+.resLlm {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border-faint);
+}
+.resLlmRow {
+  font-size: var(--fs-xs);
+  color: var(--text-primary);
+  word-break: break-all;
+}

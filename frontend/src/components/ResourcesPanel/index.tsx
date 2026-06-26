@@ -1,11 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import 'katex/dist/katex.min.css'
 import ResourceItem from './ResourceItem'
+import DomainConnector from './DomainConnector'
+import ResourcesEditor from './ResourcesEditor'
 import { api } from '../../api'
 import { renderMarkdown, renderMarkdownWithFigures, renderMarkdownWithMath, renderMarkdownWithMathAndFigures } from '../../lib/markdown'
 import type {
-  HardwareInfo, HardwareView, HypothesisDetail, HypothesisMap, HypothesisNode, Reference,
-  ReferencesView, ReferenceValidation, Resource, ResourceTab, RightTab, WorkspaceEntry, WritingStyle,
+  Domain, HardwareInfo, HardwareView, HypothesisDetail, HypothesisMap, HypothesisNode, Reference,
+  ReferencesView, ReferenceValidation, Resource, ResourceTab, RightTab, WorkspaceEntry, WritingStyle, Benchmark,
 } from '../../types'
 import s from './styles.module.css'
 
@@ -21,6 +23,8 @@ type ActivityFn = (key: string, text: string, status: 'running' | 'done' | 'erro
 interface Props {
   resources: Resource[]
   ideaId?: string
+  domainId?: string
+  domains?: Domain[]   // all domains, for the idea→domain connector in the Spec tab
   onActivity?: ActivityFn
   onAgentCommand?: (text: string) => void  // run a skill in the chat (e.g. /generate_hypothesis_map)
   mapVersion?: number                      // bump → refetch the hypothesis map
@@ -212,10 +216,11 @@ const NODE_W = 210, NODE_H = 70, COL = 210 + 56, ROW_V = 70 + 18
 
 /** Graph (tree) view of the hypothesis map — SVG edges + positioned node cards.
  *  Left-click a node to pin it; right-click for a context menu (View / Delete). */
-function HypothesisGraph({ roots, onPin, onDelete }: {
+function HypothesisGraph({ roots, onPin, onDelete, onAddChild, onRerun }: {
   roots: HypothesisNode[]; onPin: (id: string) => void; onDelete: (id: string) => void
+  onAddChild: (id: string) => void; onRerun: (id: string) => void
 }) {
-  const [menu, setMenu] = useState<{ id: string; x: number; y: number } | null>(null)
+  const [menu, setMenu] = useState<{ id: string; x: number; y: number; status: string } | null>(null)
   useEffect(() => {
     if (!menu) return
     const close = () => setMenu(null)
@@ -267,7 +272,7 @@ function HypothesisGraph({ roots, onPin, onDelete }: {
               onClick={() => onPin(p.node.id)}
               onContextMenu={e => {
                 e.preventDefault(); e.stopPropagation()
-                setMenu({ id: p.node.id, x: e.clientX, y: e.clientY })
+                setMenu({ id: p.node.id, x: e.clientX, y: e.clientY, status: p.node.status })
               }}
             >
               <span className={s.gNodeId}>{p.node.id}<span className={s.gNodeStatus}> · {p.node.stage || p.node.status}</span></span>
@@ -281,6 +286,14 @@ function HypothesisGraph({ roots, onPin, onDelete }: {
           <button className={s.ctxItem} onClick={() => { onPin(menu.id); setMenu(null) }}>
             👁 View hypothesis
           </button>
+          <button className={s.ctxItem} onClick={() => { onAddChild(menu.id); setMenu(null) }}>
+            ➕ Add sub-hypothesis
+          </button>
+          {menu.status !== 'untested' && menu.status !== 'blocked' && (
+            <button className={s.ctxItem} onClick={() => { onRerun(menu.id); setMenu(null) }}>
+              🔁 Rerun experiment{menu.status === 'inconclusive' ? ' (inconclusive)' : ''}
+            </button>
+          )}
           <button className={`${s.ctxItem} ${s.ctxItemDanger}`} onClick={() => { onDelete(menu.id); setMenu(null) }}>
             🗑 Delete hypothesis
           </button>
@@ -626,6 +639,17 @@ function HypothesisMapView({ ideaId, onActivity, onAgentCommand, mapVersion, foc
     setSub(cur => (cur === id || cur.startsWith(id + '.') ? 'map' : cur))
     api.deleteHypothesisNode(ideaId, id).then(setMap).catch(() => {})
   }
+  const addChild = (id: string) => {
+    const statement = window.prompt(`New sub-hypothesis under ${id} — a single falsifiable claim:`)?.trim()
+    if (!statement) return
+    api.addChildHypothesis(ideaId, id, statement).then(setMap).catch(() => {})
+  }
+  const rerun = (id: string) => {
+    if (!window.confirm(`Rerun the experiment for ${id}? This clears its current results and starts a fresh detached run.`)) return
+    api.rerunExperiment(ideaId, id)
+      .then(() => { pin(id); api.getHypothesisMap(ideaId).then(setMap).catch(() => {}) })
+      .catch(() => {})
+  }
 
   const nodes = map?.nodes ?? []
   const flatten = (ns: HypothesisNode[]): HypothesisNode[] => ns.flatMap(n => [n, ...flatten(n.children ?? [])])
@@ -682,7 +706,7 @@ function HypothesisMapView({ ideaId, onActivity, onAgentCommand, mapVersion, foc
               </p>
             </div>
           ) : (
-            <HypothesisGraph roots={nodes} onPin={pin} onDelete={removeNode} />
+            <HypothesisGraph roots={nodes} onPin={pin} onDelete={removeNode} onAddChild={addChild} onRerun={rerun} />
           )}
 
           {verified.length > 0 && (
@@ -764,10 +788,40 @@ function paperFileVersion(name?: string | null): number | undefined {
   return m ? Number(m[1]) : 1
 }
 
-export default function ResourcesPanel({ resources, ideaId, onActivity, onAgentCommand, mapVersion, focusHyp, spec, specLabel, hasSpec, specStreaming, domainProcess, paperText, paperFile, paperVersions, paperVersion, onSelectPaperVersion, paperDownloadUrl, paperPdfUrl, width, onSaveSpec }: Props) {
+export default function ResourcesPanel({ resources, ideaId, domainId, domains, onActivity, onAgentCommand, mapVersion, focusHyp, spec, specLabel, hasSpec, specStreaming, domainProcess, paperText, paperFile, paperVersions, paperVersion, onSelectPaperVersion, paperDownloadUrl, paperPdfUrl, width, onSaveSpec }: Props) {
   const [rightTab, setRightTab] = useState<RightTab>('spec')
   const [tab, setTab] = useState<ResourceTab>('all')
   const [hardware, setHardware] = useState<HardwareView | null>(null)
+  // Spec tab sub-view: the IDEA.md / DOMAIN.md spec, or the benchmark library. Both an idea
+  // (its own + domain + global) and a domain (its + global) show a list + per-template view.
+  const [specSub, setSpecSub] = useState<'spec' | 'benchmark' | 'resources'>('spec')
+  const [benchMd, setBenchMd] = useState<string | null>(null)
+  const [benchList, setBenchList] = useState<Benchmark[]>([])
+  const [benchSel, setBenchSel] = useState('')
+  const [benchLoaded, setBenchLoaded] = useState(false)
+  const benchEnabled = !!(ideaId || domainId)
+
+  useEffect(() => {  // context changed → reset the sub-view + benchmark cache
+    setSpecSub('spec'); setBenchMd(null); setBenchList([]); setBenchSel(''); setBenchLoaded(false)
+  }, [ideaId, domainId])
+
+  useEffect(() => {  // open the Benchmark sub-tab → load the available list (idea or domain scope)
+    if (rightTab !== 'spec' || specSub !== 'benchmark' || benchLoaded) return
+    setBenchLoaded(true)
+    const p = ideaId ? api.getIdeaBenchmarks(ideaId)
+            : domainId ? api.getBenchmarks(domainId) : null
+    p?.then(list => { setBenchList(list); if (list.length) setBenchSel(list[0].name) })
+      .catch(() => setBenchList([]))
+  }, [rightTab, specSub, ideaId, domainId, benchLoaded])
+
+  useEffect(() => {  // fetch the selected template's markdown (idea: idea>domain>global; domain: domain>global)
+    if (specSub !== 'benchmark' || !benchSel) return
+    const p = ideaId ? api.getIdeaBenchmark(ideaId, benchSel)
+            : domainId ? api.getBenchmark(benchSel, domainId) : null
+    p?.then(b => setBenchMd(b.content)).catch(() => setBenchMd(null))
+  }, [specSub, ideaId, domainId, benchSel])
+
+  const benchHtml = useMemo(() => (benchMd ? renderMarkdown(benchMd) : ''), [benchMd])
 
   // Refresh the global hardware snapshot whenever the Resources tab opens, so a
   // detection just run from Settings shows up here (no App-level wiring needed).
@@ -913,10 +967,55 @@ export default function ResourcesPanel({ resources, ideaId, onActivity, onAgentC
           </div>
         ) : (
           <div className={s.specWrap}>
-            <div
-              className={s.specMarkdown}
-              dangerouslySetInnerHTML={{ __html: specHtml || '<p>Loading…</p>' }}
-            />
+            {benchEnabled && (
+              <div className={s.tabs}>
+                <button className={`${s.tab} ${specSub === 'spec' ? s.tabActive : ''}`}
+                        onClick={() => setSpecSub('spec')}>📋 {specLabel}</button>
+                <button className={`${s.tab} ${specSub === 'benchmark' ? s.tabActive : ''}`}
+                        onClick={() => setSpecSub('benchmark')}>📊 Benchmark</button>
+                {ideaId && (
+                  <button className={`${s.tab} ${specSub === 'resources' ? s.tabActive : ''}`}
+                          onClick={() => setSpecSub('resources')}>📦 Resources</button>
+                )}
+              </div>
+            )}
+            {specSub === 'resources' && ideaId ? (
+              <ResourcesEditor key={ideaId} ideaId={ideaId} />
+            ) : specSub === 'benchmark' && benchEnabled ? (
+              benchList.length === 0 ? (
+                <div className={s.empty}>
+                  <span className={s.emptyIcon}>📊</span>
+                  <p className={s.emptyText}>
+                    No benchmark templates yet. Run <code>/setup_benchmark &lt;paper&gt;</code> in the
+                    {ideaId ? ' chat' : ' domain chat'}, or add one with <code>paperclaw benchmark add</code>.
+                  </p>
+                </div>
+              ) : (
+                <>
+                  {/* picker over the available templates (idea: own + domain + global; domain: + global) */}
+                  {benchList.length > 1 && (
+                    <select className={s.select ?? ''} value={benchSel}
+                            onChange={e => setBenchSel(e.target.value)}>
+                      {benchList.map(b => (
+                        <option key={`${b.scope}/${b.name}`} value={b.name}>
+                          {b.title || b.name}{b.scope !== 'global' ? ` (${b.scope})` : ''}
+                        </option>
+                      ))}
+                    </select>
+                  )}
+                  <div className={s.specMarkdown}
+                       dangerouslySetInnerHTML={{ __html: benchHtml || '<p>Loading…</p>' }} />
+                </>
+              )
+            ) : (
+              <>
+                {ideaId && <DomainConnector key={ideaId} ideaId={ideaId} domains={domains ?? []} />}
+                <div
+                  className={s.specMarkdown}
+                  dangerouslySetInnerHTML={{ __html: specHtml || '<p>Loading…</p>' }}
+                />
+              </>
+            )}
           </div>
         )
       ) : (

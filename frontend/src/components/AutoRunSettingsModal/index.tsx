@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { api } from '../../api'
-import type { SSHTarget, WritingStyle } from '../../types'
+import type { SSHTarget, WritingStyle, Benchmark } from '../../types'
 import s from './styles.module.css'
 
 export interface AutoRunSettings {
@@ -11,6 +11,7 @@ export interface AutoRunSettings {
   experimentMode: string
   sshTargetId?: string
   writingStyle?: string
+  benchmark?: string
   useReferenceCodebase: boolean
   fillPage: boolean
 }
@@ -58,20 +59,24 @@ export default function AutoRunSettingsModal({ open, ideaId, ideaTitle, domainId
   const [useCodebase, setUseCodebase] = useState(true)
   const [fillPage, setFillPage] = useState(false)
   const [style, setStyle] = useState('')  // '' = default prose
+  const [bench, setBench] = useState('')   // '' = no benchmark
   const [sshTargets, setSshTargets] = useState<SSHTarget[]>([])
   const [styles, setStyles] = useState<WritingStyle[]>([])
+  const [benchmarks, setBenchmarks] = useState<Benchmark[]>([])
   const [venueStatus, setVenueStatus] = useState<string | null>(null)
   const [styleStatus, setStyleStatus] = useState<string | null>(null)
+  const [benchStatus, setBenchStatus] = useState<string | null>(null)
 
   useEffect(() => {
     if (!open) return
-    setVenueStatus(null); setStyleStatus(null)
+    setVenueStatus(null); setStyleStatus(null); setBenchStatus(null)
     api.getHardware().then(h => {
       setSshTargets(h.sshTargets ?? [])
       const rc = h.runConfig
       if (rc) setExec(rc.experimentMode === 'ssh' && rc.sshTargetId ? `ssh:${rc.sshTargetId}` : rc.experimentMode)
     }).catch(() => {})
     api.getWritingStyles(domainId).then(setStyles).catch(() => {})
+    api.getBenchmarks(domainId).then(setBenchmarks).catch(() => {})
   }, [open, domainId])
 
   // Upload a custom writing-style .md, then select it.
@@ -84,6 +89,18 @@ export default function AutoRunSettingsModal({ open, ideaId, ideaTitle, domainId
       const fresh = await api.getWritingStyles(domainId)
       setStyles(fresh); setStyle(r.name); setStyleStatus(`✓ added “${r.name}”`)
     } catch (e) { setStyleStatus(`⚠️ ${String((e as Error).message ?? e)}`) }
+  }
+
+  // Upload a benchmark template (.md / .csv published-results table), then select it.
+  const onBenchFile = async (file?: File) => {
+    if (!file) return
+    try {
+      const content = await file.text()
+      const name = file.name.replace(/\.(md|csv|txt)$/i, '')
+      const r = await api.saveBenchmark(name, content, domainId)
+      const fresh = await api.getBenchmarks(domainId)
+      setBenchmarks(fresh); setBench(r.name); setBenchStatus(`✓ added “${r.name}”`)
+    } catch (e) { setBenchStatus(`⚠️ ${String((e as Error).message ?? e)}`) }
   }
 
   // Upload a LaTeX venue template (zip or single style/class/tex) into the idea's venue/.
@@ -104,7 +121,8 @@ export default function AutoRunSettingsModal({ open, ideaId, ideaTitle, domainId
     onStart({
       positive, maxHypotheses, pageLimit, maxDepth,
       experimentMode: mode, sshTargetId: sshId,
-      writingStyle: style || undefined, useReferenceCodebase: useCodebase, fillPage,
+      writingStyle: style || undefined, benchmark: bench || undefined,
+      useReferenceCodebase: useCodebase, fillPage,
     })
   }
 
@@ -146,6 +164,24 @@ export default function AutoRunSettingsModal({ open, ideaId, ideaTitle, domainId
           </label>
         </div>
         {styleStatus && <div className={s.uploadStatus}>{styleStatus}</div>}
+
+        <label className={s.label}>Benchmark (optional — published baselines to beat)</label>
+        <div className={s.uploadRow}>
+          <select className={s.select} value={bench} onChange={e => setBench(e.target.value)}>
+            <option value="">None</option>
+            {benchmarks.map(b => (
+              <option key={`${b.scope}/${b.name}`} value={b.name}>
+                {b.title || b.name}{b.scope === 'domain' ? ' (domain)' : ''}
+              </option>
+            ))}
+          </select>
+          <label className={s.uploadBtn} title="Upload a benchmark table (.md / .csv)">
+            ⬆ table
+            <input type="file" accept=".md,.csv,.txt,text/markdown,text/csv" hidden
+                   onChange={e => onBenchFile(e.target.files?.[0])} />
+          </label>
+        </div>
+        {benchStatus && <div className={s.uploadStatus}>{benchStatus}</div>}
 
         <label className={s.label}>LaTeX template (optional)</label>
         <div className={s.uploadRow}>

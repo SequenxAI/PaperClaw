@@ -203,6 +203,42 @@ def cmd_idea(client, args) -> None:
     elif args.action == "delete":
         client.idea_delete(args.id)
         print("deleted")
+    elif args.action == "domains":
+        names = {d["id"]: d["name"] for d in client.domains_list()}
+        current = client.idea_domains_get(args.id)
+        if args.clear:
+            current = []
+        elif args.set is not None:
+            current = [x.strip() for x in args.set.split(",") if x.strip()]
+        else:
+            for did in (args.add or []):
+                if did not in current:
+                    current.append(did)
+            current = [d for d in current if d not in (args.remove or [])]
+        if args.clear or args.set is not None or args.add or args.remove:
+            current = client.idea_domains_set(args.id, current)
+        if not current:
+            print("(no domains connected)")
+        for did in current:
+            print(f"{did}  {names.get(did, '?')}")
+    elif args.action == "color":
+        idea = client.idea_set_color(args.id, args.color)
+        print(f"flagged {idea['id']} → {idea.get('color') or '(cleared)'}")
+    elif args.action == "resources":
+        changed = any(getattr(args, k) is not None for k in ("mode", "ssh", "codebase"))
+        if changed:
+            r = client.idea_resources_set(
+                args.id, experiment_mode=args.mode, ssh_target_id=args.ssh,
+                use_reference_codebase=args.codebase)
+        else:
+            r = client.idea_resources_get(args.id)
+        print(f"compute: {r['experimentMode']}"
+              + (f" → {r['sshTargetId']}" if r.get("sshTargetId") else "")
+              + f"  | reference codebase: {'on' if r['useReferenceCodebase'] else 'off'}")
+        print(f"LLM: {r['llmProvider']} · {r['llmModel']} · "
+              f"{'key configured' if r['llmKeyConfigured'] else 'key MISSING'}")
+        if r.get("sshTargets"):
+            print("SSH hosts: " + ", ".join(f"{t['id']} ({t.get('host')})" for t in r["sshTargets"]))
 
 
 def cmd_research(client, args) -> None:
@@ -233,6 +269,7 @@ def cmd_research(client, args) -> None:
     client.research_stream(
         args.idea, on_event, restart=args.restart,
         max_hypotheses=args.max_hypotheses, page_limit=args.page_limit,
+        benchmark=getattr(args, "benchmark", None),
     )
     if error:
         raise ClientError(error[0])
@@ -292,6 +329,7 @@ def cmd_run(client, args) -> None:
         experiment_mode=getattr(args, "experiment_mode", None),
         ssh_target_id=getattr(args, "ssh_target", None),
         writing_style=getattr(args, "style", None),
+        benchmark=getattr(args, "benchmark", None),
         use_reference_codebase=not getattr(args, "no_codebase", False),
         fill_page=getattr(args, "fill_page", False),
     )
@@ -455,6 +493,16 @@ def cmd_hypothesis(client, args) -> None:
         client.hypothesis_delete(args.idea, args.id)
         print(f"removed hypothesis {args.id}")
         return
+    if action == "add-child":
+        hmap = client.hypothesis_add_child(args.idea, args.id, args.statement)
+        print(f"added sub-hypothesis under {args.id}")
+        _print_hyp_nodes(hmap.get("nodes", []))
+        return
+    if action == "rerun":
+        job = client.hypothesis_rerun(args.idea, args.id)
+        print(f"reran {args.id}: cleared results + started job {job.get('jobId')} "
+              f"(monitor: paperclaw hypothesis {args.idea} experiment {args.id}, or paperclaw experiments)")
+        return
     if action == "files":
         base = f"hypotheses/{args.id}"
         if getattr(args, "cat", None):
@@ -582,11 +630,14 @@ def cmd_hardware(client, args) -> None:
             print(f"  {t['id']}  {t['user']}@{t['host']}:{t['port']}  {t.get('label') or ''}")
     rc = view.get("runConfig")
     if rc:
-        ssh = f", ssh-target: {rc['sshTargetId']}" if rc.get("sshTargetId") else ""
-        agent = f", agent: {rc['agentCommand']}" if rc.get("agentCommand") else ""
-        print(f"experiment mode: {rc['experimentMode']} "
-              f"(python: {rc.get('pythonPath') or 'default'}, "
-              f"attempts: {rc['maxAttempts']}{ssh}{agent})")
+        mode = rc["experimentMode"]
+        bits = []
+        if mode == "ssh":  # ssh needs only its connection — no interpreter / extra settings
+            bits.append(f"ssh-target: {rc.get('sshTargetId') or '(none — pick one)'}")
+        elif mode == "cli" and rc.get("agentCommand"):
+            bits.append(f"agent: {rc['agentCommand']}")
+        bits.append(f"attempts: {rc['maxAttempts']}")
+        print(f"experiment mode: {mode} ({', '.join(bits)})")
 
 
 def cmd_experiment_run(client, args) -> None:
@@ -629,6 +680,18 @@ def cmd_styles(client, args) -> None:
         print(f"saved writing style: {out['name']}" + (f" (domain {args.domain})" if args.domain else " (global)"))
 
 
+def cmd_benchmark(client, args) -> None:
+    if args.action == "list":
+        for b in client.benchmarks_list(args.domain):
+            print(f"· {b['name']:<22} [{b['scope']}]  {b['title']}")
+    elif args.action == "show":
+        print(client.benchmark_get(args.name, args.domain)["content"])
+    elif args.action == "add":
+        content = open(args.file, encoding="utf-8").read() if args.file else sys.stdin.read()
+        out = client.benchmark_save(args.name, content, args.domain)
+        print(f"saved benchmark: {out['name']}" + (f" (domain {args.domain})" if args.domain else " (global)"))
+
+
 def cmd_doctor(client, args) -> None:
     report = client.doctor()
     icons = {"ok": "✓", "warn": "!", "fail": "✗"}
@@ -643,7 +706,7 @@ def cmd_doctor(client, args) -> None:
         sys.exit(1)
 
 
-COMMANDS = {"serve", "chat", "domain", "brainstorm", "idea", "research", "run", "status", "stop", "resume", "references", "hypothesis", "history", "settings", "hardware", "doctor", "styles", "experiments", "experiment-run"}
+COMMANDS = {"serve", "chat", "domain", "brainstorm", "idea", "research", "run", "status", "stop", "resume", "references", "hypothesis", "history", "settings", "hardware", "doctor", "styles", "benchmark", "experiments", "experiment-run"}
 
 
 def _normalize_argv(argv: list[str]) -> list[str]:
@@ -715,12 +778,30 @@ def main() -> None:
     p = isub.add_parser("show"); p.add_argument("id")
     p = isub.add_parser("duplicate", help="fork an idea (copies IDEA.md + ref.bib)"); p.add_argument("id")
     p = isub.add_parser("delete"); p.add_argument("id")
+    p = isub.add_parser("domains", help="show/connect the idea's domains (mounted at ./domains/<name>)")
+    p.add_argument("id")
+    p.add_argument("--add", action="append", metavar="DOMAIN_ID", help="connect a domain (repeatable)")
+    p.add_argument("--remove", action="append", metavar="DOMAIN_ID", help="disconnect a domain (repeatable)")
+    p.add_argument("--set", help="comma-separated domain ids to connect (replaces the set)")
+    p.add_argument("--clear", action="store_true", help="disconnect all domains")
+    p = isub.add_parser("color", help="flag an idea with a sidebar colour")
+    p.add_argument("id")
+    p.add_argument("color", nargs="?", default="", help="green | yellow | grey (omit to clear)")
+    p = isub.add_parser("resources", help="show/allocate the idea's experiment resources (compute/GPU)")
+    p.add_argument("id")
+    p.add_argument("--mode", choices=["cli", "executed", "ssh", "simulated"],
+                   help="experiment-execution mode for this idea")
+    p.add_argument("--ssh", help="SSH target id (GPU host) when --mode ssh")
+    p.add_argument("--codebase", type=lambda v: v.lower() in ("1", "true", "yes", "on"),
+                   metavar="BOOL", help="reuse the pinned domain's reference codebase (true/false)")
 
     research = sub.add_parser("research", help="Run the iterative hypothesis-loop pipeline on an idea")
     research.add_argument("idea", help="idea id")
     research.add_argument("--restart", action="store_true", help="discard saved rounds and start fresh")
     research.add_argument("--max-hypotheses", dest="max_hypotheses", type=int, default=4)
     research.add_argument("--page-limit", dest="page_limit", type=int, default=9)
+    research.add_argument("--benchmark", dest="benchmark", default=None,
+                          help="benchmark-template name (fixed protocol + published, cited baselines)")
 
     run = sub.add_parser("run", help="Run the autonomous pipeline: topic → doctor → domain → idea → hypotheses → paper")
     run.add_argument("topic", nargs="?",
@@ -743,6 +824,9 @@ def main() -> None:
                      help="SSH remote id to run experiments on (with --experiment-mode ssh)")
     run.add_argument("--style", dest="style", default=None,
                      help="writing-style guide name for the paper (e.g. technical-concise)")
+    run.add_argument("--benchmark", dest="benchmark", default=None,
+                     help="benchmark-template name — run only the new method on its fixed protocol "
+                          "and compare to its published, cited baselines (a name from `benchmark list`)")
     run.add_argument("--no-codebase", dest="no_codebase", action="store_true",
                      help="do NOT reuse the pinned domain's reference codebase for experiments")
     run.add_argument("--fill-page", dest="fill_page", action="store_true",
@@ -780,6 +864,11 @@ def main() -> None:
     hfil.add_argument("--cat", help="print one file's contents (path relative to the hypothesis dir)")
     hdel = hypsub.add_parser("delete", help="remove a hypothesis node (and its subtree) from the map")
     hdel.add_argument("id", help="hypothesis node id")
+    hadd = hypsub.add_parser("add-child", help="add a sub-hypothesis under a node")
+    hadd.add_argument("id", help="parent hypothesis node id")
+    hadd.add_argument("statement", help="the sub-hypothesis (a single falsifiable claim)")
+    hrer = hypsub.add_parser("rerun", help="clear a hypothesis's results + start a fresh experiment job")
+    hrer.add_argument("id", help="hypothesis node id")
 
     history = sub.add_parser("history", help="List conversations / show one")
     history.add_argument("context", nargs="?", help="context id (omit to list all)")
@@ -827,12 +916,23 @@ def main() -> None:
     p.add_argument("name"); p.add_argument("--file", help="markdown file (else read stdin)")
     p.add_argument("--domain", help="save as a domain-scoped style")
 
+    bench = sub.add_parser("benchmark", help="Benchmark templates (fixed protocol + published, cited baselines)")
+    bnsub = bench.add_subparsers(dest="action", required=True)
+    p = bnsub.add_parser("list", help="list global + domain benchmark templates")
+    p.add_argument("--domain", help="also include a domain's benchmarks")
+    p = bnsub.add_parser("show", help="print a benchmark template's markdown")
+    p.add_argument("name"); p.add_argument("--domain", help="resolve within a domain first")
+    p = bnsub.add_parser("add", help="create/overwrite a benchmark template (from --file or stdin)")
+    p.add_argument("name"); p.add_argument("--file", help="markdown/csv file (else read stdin)")
+    p.add_argument("--domain", help="save as a domain-scoped benchmark")
+
     p = hwsub.add_parser("run-config", help="show/set experiment execution mode")
     p.add_argument("--mode", choices=["cli", "executed", "ssh", "simulated"],
-                   help="cli (default, real) | executed (real, in-process) | ssh (BETA, untested) "
-                        "| simulated (NOT real — narrated/fake data, avoid)")
-    p.add_argument("--python", help="python interpreter path for executed/ssh runs")
-    p.add_argument("--ssh-target", dest="ssh_target", help="SSH remote id for ssh mode")
+                   help="cli (default, real) | executed (real, in-process agent) | ssh (agent runs "
+                        "bash on a remote — needs only --ssh-target) | simulated (NOT real — narrated/fake, avoid)")
+    p.add_argument("--python", help="python interpreter path for the legacy single-shot runners "
+                                    "(ignored by executed/ssh — the agent runs python via bash)")
+    p.add_argument("--ssh-target", dest="ssh_target", help="SSH remote id for ssh mode (the only setting ssh needs)")
     p.add_argument("--agent-command", dest="agent_command",
                    help="cli mode: headless agent command template, e.g. "
                         "'claude -p {prompt} --dangerously-skip-permissions' or 'opencode run {prompt}'")
@@ -842,8 +942,21 @@ def main() -> None:
 
     if args.command == "serve":
         import uvicorn
-        uvicorn.run("paperclaw.server.app:create_app", factory=True,
-                    host=args.host, port=args.port, reload=args.reload)
+        # Force-close lingering connections after a few seconds on shutdown/reload. PaperClaw
+        # holds LONG-LIVED SSE streams (chat, experiment + auto-run logs); without this,
+        # a `--reload` (or Ctrl+C) hangs forever at "Waiting for connections to close" because
+        # those streams never end on their own — wedging the whole backend.
+        kwargs = dict(host=args.host, port=args.port, reload=args.reload,
+                      timeout_graceful_shutdown=5)
+        if args.reload:
+            # Watch only the SOURCE package — NOT the launch dir. Otherwise uvicorn's
+            # reloader watches everything under cwd (incl. the PaperClaw home / ./saves),
+            # and a running experiment writing run_experiment.py / results.json / *.log
+            # there triggers an endless reload storm that makes the API unresponsive.
+            import os
+            import paperclaw
+            kwargs["reload_dirs"] = [os.path.dirname(os.path.abspath(paperclaw.__file__))]
+        uvicorn.run("paperclaw.server.app:create_app", factory=True, **kwargs)
         return
     if args.command is None:
         parser.print_help()
@@ -867,6 +980,7 @@ def main() -> None:
         "hardware": cmd_hardware,
         "doctor": cmd_doctor,
         "styles": cmd_styles,
+        "benchmark": cmd_benchmark,
         "experiments": cmd_experiments,
         "experiment-run": cmd_experiment_run,
     }

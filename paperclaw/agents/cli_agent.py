@@ -32,8 +32,31 @@ from pathlib import Path
 from typing import AsyncIterator
 
 _DRAIN_GRACE = 2.0  # secs to flush trailing output after the agent is done before we stop
-_DELIVERABLE_GRACE = 120.0  # secs to wait for results.json after the agent reports done
-                            # (a foreground run flushing it) before finalizing regardless
+_DELIVERABLE_GRACE = 120.0  # base secs to wait for results.json after the agent reports done
+                            # (a foreground run flushing it) before finalizing
+_STALL_GRACE = 600.0        # ...but KEEP waiting while the experiment is still writing files
+                            # (the agent backgrounded training); give up after this much QUIET
+
+# Files the runner itself writes — excluded when checking whether the EXPERIMENT is still
+# producing output, so our own logging doesn't look like progress.
+_RUNNER_FILES = frozenset({"events.jsonl", "stdout.log", "runner.log", "agent_stream.log",
+                           "job.json", ".run_override.json", "task.md"})
+
+
+def _latest_work_mtime(out_dir: Path) -> float:
+    """Newest mtime among the experiment's OWN output files (ignores the runner's bookkeeping),
+    so a backgrounded training job that keeps writing checkpoints/logs reads as 'still working'."""
+    latest = 0.0
+    try:
+        for p in out_dir.rglob("*"):
+            if p.is_file() and p.name not in _RUNNER_FILES:
+                try:
+                    latest = max(latest, p.stat().st_mtime)
+                except OSError:
+                    pass
+    except OSError:
+        pass
+    return latest
 
 try:
     import pty  # POSIX only — gives the agent a real terminal so it streams
@@ -434,13 +457,25 @@ async def run_cli_agent(
             loop = asyncio.get_running_loop()
 
             async def _await_deliverable():
-                end = loop.time() + _DELIVERABLE_GRACE
-                while loop.time() < end and not (out_dir / "results.json").is_file():
-                    await asyncio.sleep(2.0)
-                stop_event.set()  # results.json appeared, or the grace elapsed
+                # Wait the base grace; but if the experiment is STILL writing output (a
+                # backgrounded training the agent launched), keep waiting until results.json
+                # lands or the workspace goes quiet for _STALL_GRACE — the job has no timeout,
+                # so we must not abandon a run that's still producing results.
+                last_mtime = _latest_work_mtime(out_dir)
+                deadline = loop.time() + _DELIVERABLE_GRACE
+                while not (out_dir / "results.json").is_file():
+                    await asyncio.sleep(3.0)
+                    m = _latest_work_mtime(out_dir)
+                    if m > last_mtime:                 # files still changing → work in progress
+                        last_mtime = m
+                        deadline = loop.time() + _STALL_GRACE
+                    elif loop.time() >= deadline:      # quiet past the grace → give up
+                        break
+                stop_event.set()  # results.json appeared, or the workspace went quiet
             loop.create_task(_await_deliverable())
-            return _emit(f"\n[agent reported done but results.json is not written yet — "
-                         f"waiting up to {int(_DELIVERABLE_GRACE)}s for it before finalizing.]\n")
+            return _emit("\n[agent reported done but results.json is not written yet — waiting "
+                         "for it while the experiment keeps writing output (a backgrounded run); "
+                         "finalizing once it appears or the workspace goes quiet.]\n")
 
         try:
             async for kind, payload in _stream_command(cmd, str(out_dir), deadline, stop_event):

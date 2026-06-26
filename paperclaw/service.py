@@ -6,6 +6,7 @@ domain creation.
 """
 
 import asyncio
+import difflib
 import json
 import os
 import re
@@ -14,7 +15,7 @@ import time
 import uuid
 from typing import AsyncIterator
 
-from paperclaw import codebase, hardware, literature, llm, references, writing_styles
+from paperclaw import benchmarks, codebase, hardware, literature, llm, references, writing_styles
 from paperclaw import tools as _tools
 from paperclaw.agents import deep_chat
 from paperclaw.config import LLMSettings, paperclaw_home
@@ -41,6 +42,7 @@ from paperclaw.ideas import (
     SETUP_VENUE_DIRECTIVE,
     WRITE_PAPER_DIRECTIVE,
 )
+from paperclaw.prompts.benchmarks import SETUP_BENCHMARK_DIRECTIVE
 from paperclaw.prompts.domains import DOMAIN_TOOL_ADDENDUM
 from paperclaw.prompts.hardware import HARDWARE_ASSESS_SYSTEM
 from paperclaw.prompts.writing_styles import DEFAULT_STYLE
@@ -76,6 +78,7 @@ from paperclaw.skills import (
     HYPOTHESIS_MAP_COMMAND,
     IDEA_GENERATION_COMMAND,
     PIN_IDEA_COMMAND,
+    SETUP_BENCHMARK_COMMAND,
     SETUP_CODEBASE_COMMAND,
     SETUP_VENUE_COMMAND,
     VALIDATE_REFERENCES_COMMAND,
@@ -172,18 +175,87 @@ def _extract_question(reply: str) -> tuple[str, dict | None]:
 
 
 # ── Chat ────────────────────────────────────────────────────────────────────
+def _cleanup_domain_mounts(store: Store, idea_id: str) -> None:
+    """Remove any ``<idea>/domains/<slug>`` (or legacy ``<idea>/domain``) SYMLINKS an
+    earlier build created. The deepagents sandbox resolves a read THROUGH such a symlink
+    and rejects it ('Path … outside root directory'), which crashed the chat turn — so we
+    no longer mount domains as symlinks; the agent reads them via `bash` + absolute paths."""
+    idea_dir = store.idea_path(idea_id)
+    if idea_dir is None:
+        return
+    try:
+        legacy = idea_dir / "domain"
+        if legacy.is_symlink():
+            legacy.unlink()
+        mount = idea_dir / "domains"
+        if mount.is_dir():
+            for child in mount.iterdir():
+                if child.is_symlink():
+                    child.unlink()
+            try:
+                mount.rmdir()  # drop it if now empty (it only ever held symlinks)
+            except OSError:
+                pass
+    except OSError:
+        pass
+
+
 def _idea_chat_system(store: Store, idea_id: str, spec: str) -> str:
-    """System prompt for an idea chat: CHAT_SYSTEM(spec) PLUS the pinned domain's
-    DOMAIN.md as READ-ONLY context. The idea agent's file tools are sandboxed to the
-    idea folder and can't reach domains/<id>/DOMAIN.md, so its field/literature context
-    (Crucial Papers with authors+year, datasets, venues) is injected here."""
+    """System prompt for an idea chat: CHAT_SYSTEM(spec) PLUS, for every CONNECTED domain,
+    its DOMAIN.md inlined and its folder's absolute path (read via `bash`, since it's outside
+    the sandbox), PLUS the in-force benchmark's published SOTA table — so 'compare to the
+    benchmark' uses the cited published numbers, not the idea's own experiment results."""
     system = CHAT_SYSTEM.format(spec=spec)
-    domain_id = resolve_domain_id_for_idea(store, idea_id)
-    domain_md = store.get_domain_spec(domain_id) if domain_id else None
-    if domain_md:  # linked domain → inject its DOMAIN.md (+ its path); blank if none
-        note = DOMAIN_REFERENCE_NOTE.replace("{domain_path}", f"domains/{domain_id}/DOMAIN.md")
-        system += "\n\n" + note + domain_md
+    domain_ids = resolve_domain_ids_for_idea(store, idea_id)
+    _cleanup_domain_mounts(store, idea_id)
+    names = {d.id: d.name for d in store.list_domains()}
+    blocks = []
+    for did in domain_ids:
+        md = store.get_domain_spec(did)
+        ddir = store.domain_path(did)
+        if md and ddir:
+            blocks.append(f"### Domain: {names.get(did, '') or did}  (files at `{ddir}` — read with `bash`)\n\n{md}")
+    if blocks:  # connected domain(s) → reference note + inline each DOMAIN.md
+        system += "\n\n" + DOMAIN_REFERENCE_NOTE + "\n\n".join(blocks)
+    bench = idea_benchmark_note(store, idea_id)
+    if bench:  # the published, cited SOTA table to compare against (≠ the idea's own results)
+        system += "\n\n" + bench
     return system
+
+
+# Markers of a TRANSIENT model error (network/timeout/5xx/rate-limit/overload) — the kind a
+# user can just retry by typing "continue", vs. a genuine config/runtime failure.
+_TRANSIENT_ERR_MARKERS = (
+    "apiconnectionerror", "apitimeouterror", "connecterror", "connecttimeout",
+    "readtimeout", "writetimeout", "pooltimeout", "remoteprotocolerror", "readerror",
+    "ratelimiterror", "internalservererror", "serviceunavailable", "apistatuserror",
+    "connection error", "connection reset", "timed out", "timeout", "temporarily unavailable",
+    "overloaded", "rate limit", "bad gateway", "gateway timeout", " 502", " 503", " 504",
+)
+
+
+def _is_transient_chat_error(exc: Exception) -> bool:
+    """True for a network/timeout/5xx/rate-limit error the user can resume from (just retry),
+    vs. a genuine config/runtime failure that needs attention."""
+    blob = f"{type(exc).__name__}: {exc}".lower()
+    return any(m in blob for m in _TRANSIENT_ERR_MARKERS)
+
+
+def _interrupted_chat_message(acc_parts: list[dict], exc: Exception, deep: bool) -> str:
+    """The assistant message to persist when a chat turn fails: the agent's PARTIAL text so far
+    (so 'continue' has context) followed by a resume-oriented note. A transient drop gets a soft
+    'type continue to resume'; a real failure keeps the actionable hint."""
+    partial = "".join(p.get("text", "") for p in acc_parts if p.get("kind") == "text").strip()
+    if _is_transient_chat_error(exc):
+        note = (f"\n\n⚠️ Lost the connection to the model ({type(exc).__name__}) — usually transient "
+                "(it was retried automatically). Your progress above is saved; type **continue** to "
+                "resume from where it left off.")
+    elif deep:
+        note = (f"\n\n⚠️ The chat agent hit an error ({type(exc).__name__}: {exc}). Type **continue** to "
+                "retry, or set `chat_agent` back to 'builtin' in Settings/.env if it persists.")
+    else:
+        note = f"\n\n⚠️ {exc}"
+    return (partial + note).strip()
 
 
 async def send_chat(
@@ -369,6 +441,34 @@ async def send_chat(
 
 
 # ── Brainstorm ──────────────────────────────────────────────────────────────
+def _existing_idea_labels(store: Store, query: str, limit: int = 20) -> list[str]:
+    """Titles of pinned ideas + brainstorm seeds, FUZZY-RANKED by relevance to *query*
+    (token overlap, then sequence similarity), top *limit*. Fed to the brainstormer so it
+    stops regenerating near-duplicates of what already exists — pinned ideas were the gap
+    (only seeds were considered before, so prior ideas kept reappearing)."""
+    labels: list[str] = []
+    seen: set[str] = set()
+    for idea in store.list_ideas():       # pinned ideas — the main source of duplicates
+        t = (idea.title or "").strip()
+        if t and t.lower() not in seen:
+            seen.add(t.lower()); labels.append(t)
+    for s in store.list_seeds():          # seeds / drafts not yet pinned
+        t = (s.text or "").strip()
+        if t and t.lower() not in seen:
+            seen.add(t.lower()); labels.append(t)
+    if not labels or not query.strip():
+        return labels[:limit]
+    q = query.lower()
+    qtokens = set(re.findall(r"\w+", q))
+
+    def score(label: str) -> tuple[int, float]:  # 模糊搜索: rank by relevance to the query
+        lt = label.lower()
+        overlap = len(qtokens & set(re.findall(r"\w+", lt)))
+        return (overlap, difflib.SequenceMatcher(None, q, lt).ratio())
+
+    return sorted(labels, key=score, reverse=True)[:limit]
+
+
 async def _build_brainstorm(
     store: Store,
     settings: LLMSettings,
@@ -383,7 +483,6 @@ async def _build_brainstorm(
     ``"draft"`` (domain-grounded full IDEA.md drafts) or ``"seed"`` (one-liners) and
     *statuses* are progress messages to surface. Shared by the blocking and streaming
     paths so the search runs ONCE and both build the prompt identically."""
-    existing = [s.text for s in store.list_seeds()]
     directive = brainstorm_directive(idea_types, emphasis)
     domain_specs = store.selected_domain_specs()
     statuses: list[str] = []
@@ -391,11 +490,18 @@ async def _build_brainstorm(
     if domain_specs:
         n = _clamp_count(count, DRAFT_COUNT)
         query = " ".join(domain.name for domain, _ in domain_specs[:2])
-        statuses.append(f"Searching OpenAlex for papers on '{query}'…")
-        papers = await literature.search_recent_papers(query)
-        m = len(papers)
-        statuses.append(f"Found {m} paper{'s' if m != 1 else ''}. Brainstorming idea drafts…")
-        paper_ctx = literature.format_papers_for_prompt(papers)
+        # Anonymous OpenAlex (no key) is rate-limited to nothing — skip the search rather
+        # than always reporting "Found 0 papers" and waiting on a pointless request.
+        if settings.openalex_api_key:
+            statuses.append(f"Searching OpenAlex for papers on '{query}'…")
+            papers = await literature.search_recent_papers(query)
+            m = len(papers)
+            statuses.append(f"Found {m} paper{'s' if m != 1 else ''}. Brainstorming idea drafts…")
+            paper_ctx = literature.format_papers_for_prompt(papers)
+        else:
+            statuses.append("No OpenAlex key (Settings → Academic search) — skipping literature "
+                            "search. Brainstorming idea drafts…")
+            paper_ctx = ""
         domains_text = "\n\n".join(spec[:DOMAIN_SPEC_CHAR_LIMIT] for _, spec in domain_specs)
         system = BRAINSTORM_DRAFT_SYSTEM.format(n=n, domains=domains_text)
         prompt = "Brainstorm idea drafts from the domain specs."
@@ -405,15 +511,21 @@ async def _build_brainstorm(
             prompt += f" Focus: {hint}"
         if paper_ctx:
             prompt += f"\n\nAdditional context from recent literature:\n{paper_ctx}"
+        existing = _existing_idea_labels(store, f"{query} {hint or ''}")
         if existing:
-            prompt += "\nAvoid duplicating these existing ideas:\n" + "\n".join(existing[:20])
+            prompt += ("\n\nThese ideas ALREADY EXIST — generate genuinely DIFFERENT ones, "
+                       "do NOT restate or lightly reword any of these:\n"
+                       + "\n".join(f"- {t}" for t in existing))
         return system, prompt, 8192, "draft", statuses
 
     n = _clamp_count(count, GENERATE_COUNT)
     search_query = hint or "machine learning research"
     statuses.append("Brainstorming idea seeds…")
-    papers = await literature.search_recent_papers(search_query, limit=5)
-    paper_ctx = literature.format_papers_for_prompt(papers)
+    if settings.openalex_api_key:  # skip the rate-limited anonymous search when no key
+        papers = await literature.search_recent_papers(search_query, limit=5)
+        paper_ctx = literature.format_papers_for_prompt(papers)
+    else:
+        paper_ctx = ""
     prompt = "Generate research idea seeds."
     if directive:
         prompt += f" {directive}"
@@ -421,8 +533,11 @@ async def _build_brainstorm(
         prompt += f" Focus area: {hint}"
     if paper_ctx:
         prompt += f"\n\nRecent papers for inspiration:\n{paper_ctx}"
+    existing = _existing_idea_labels(store, hint or search_query)
     if existing:
-        prompt += "\nAvoid duplicating these existing seeds:\n" + "\n".join(existing[:20])
+        prompt += ("\n\nThese ideas ALREADY EXIST — generate genuinely DIFFERENT ones, "
+                   "do NOT restate or lightly reword any of these:\n"
+                   + "\n".join(f"- {t}" for t in existing))
     return BRAINSTORM_SYSTEM.format(n=n), prompt, 512, "seed", statuses
 
 
@@ -814,7 +929,8 @@ async def _write_hypothesis_plan(store: Store, settings: LLMSettings, idea_id: s
     result = await llm.chat(
         settings, HYPOTHESIS_PLAN_SYSTEM,
         [{"role": "user", "content":
-          f"IDEA.md:\n{spec}\n\nTarget hypothesis:\n{_format_node_for_plan(node)}\n\nAvailable hardware:\n{hw}"}],
+          f"IDEA.md:\n{spec}{idea_benchmark_note(store, idea_id)}\n\n"
+          f"Target hypothesis:\n{_format_node_for_plan(node)}\n\nAvailable hardware:\n{hw}"}],
         max_tokens=1400,
     )
     hdir = idea_path / "hypotheses" / node["id"]
@@ -859,7 +975,10 @@ async def stream_hypothesis_experiment(store: Store, settings: LLMSettings, idea
     hdir = idea_path / "hypotheses" / hid
     hdir.mkdir(parents=True, exist_ok=True)
     spec = store.get_spec(idea_id) or ""
-    base_ctx = f"IDEA.md:\n{spec}"
+    # If a benchmark template is in force (persisted by the pipeline, or the domain default),
+    # reframe BOTH the plan and the experiment: run only the new method on its fixed protocol
+    # and compare to the cited baselines.
+    base_ctx = f"IDEA.md:\n{spec}" + idea_benchmark_note(store, idea_id)
     # Effective run config: a per-job override pinned by the (auto-run) pipeline —
     # experiment mode / SSH target / reference-codebase reuse for THIS run — else the
     # global config. Without this the detached child would silently ignore per-run
@@ -870,7 +989,7 @@ async def stream_hypothesis_experiment(store: Store, settings: LLMSettings, idea
     override = jobs.read_run_override(hdir)
     run_cfg = override["runConfig"] if override else store.get_run_config()
     use_ref_cb = override["useReferenceCodebase"] if override else True
-    cb_path = ip._resolve_domain_codebase(store, spec) if use_ref_cb else None  # domain ref codebase
+    cb_path = ip._resolve_domain_codebase(store, idea_id, spec) if use_ref_cb else None  # domain ref codebase
 
     # ── plan (stream its generation if missing) ───────────────────────────────
     plan = (hdir / "plan.md").read_text(encoding="utf-8") if (hdir / "plan.md").is_file() else None
@@ -882,7 +1001,7 @@ async def stream_hypothesis_experiment(store: Store, settings: LLMSettings, idea
             async for ev in llm.stream_chat_thinking(
                 settings, HYPOTHESIS_PLAN_SYSTEM,
                 [{"role": "user", "content":
-                  f"IDEA.md:\n{spec}\n\nTarget hypothesis:\n{_format_node_for_plan(node)}\n\nAvailable hardware:\n{hw}"}],
+                  f"{base_ctx}\n\nTarget hypothesis:\n{_format_node_for_plan(node)}\n\nAvailable hardware:\n{hw}"}],
                 max_tokens=1400,
             ):
                 if ev["type"] == "thinking":
@@ -976,7 +1095,7 @@ async def run_hypothesis_experiment(store: Store, settings: LLMSettings, idea_id
     run_cfg = store.get_run_config()
     spec = store.get_spec(idea_id) or ""
     base_ctx = f"IDEA.md:\n{spec}"
-    cb_path = ip._resolve_domain_codebase(store, spec)  # domain reference codebase, if any
+    cb_path = ip._resolve_domain_codebase(store, idea_id, spec)  # domain reference codebase, if any
     if run_cfg.experiment_mode in ("executed", "ssh", "cli"):
         target = ip._resolve_ssh_target(store, run_cfg) if run_cfg.experiment_mode == "ssh" else None
         if run_cfg.experiment_mode == "ssh" and target is None:
@@ -998,6 +1117,36 @@ async def run_hypothesis_experiment(store: Store, settings: LLMSettings, idea_id
     return get_hypothesis_detail(store, idea_id, hid)
 
 
+_CODE_CAP = 60_000  # cap the aggregated code view; the Files tab has everything
+
+
+def _collect_experiment_code(hdir) -> str | None:
+    """All of the agent's experiment code, concatenated with per-file headers — so the
+    'generated code' view is COMPLETE and CONSISTENT across runners (the agentic `executed`
+    /`ssh` runners and the `cli` agent build a MULTI-file layout, not just run.py). Top-level
+    `*.py` only, so a copied reference codebase in a subdir doesn't bloat it; the 📁 Files
+    tab still lists everything."""
+    if not hdir.is_dir():
+        return None
+    files = sorted(p for p in hdir.glob("*.py") if p.is_file())
+    if not files:
+        return None
+    blocks: list[str] = []
+    total = 0
+    for p in files:
+        try:
+            body = p.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        block = f"# ===== {p.name} =====\n{body}"
+        blocks.append(block)
+        total += len(block)
+        if total >= _CODE_CAP:
+            blocks.append(f"# … (truncated — {len(files)} code files in all; open the 📁 Files tab)")
+            break
+    return "\n\n".join(blocks) if blocks else None
+
+
 def get_hypothesis_detail(store: Store, idea_id: str, hid: str) -> HypothesisDetail:
     """Per-hypothesis pipeline artifacts (plan / experiment / report / log / figures)."""
     idea_path = store.idea_path(idea_id)
@@ -1016,7 +1165,7 @@ def get_hypothesis_detail(store: Store, idea_id: str, hid: str) -> HypothesisDet
     return HypothesisDetail(
         ideaId=idea_id, hypothesisId=hid,
         status=(node or {}).get("status", "untested"),
-        plan=rd("plan.md"), code=rd("run.py"), experiment=rd("experiment.md"),
+        plan=rd("plan.md"), code=_collect_experiment_code(hdir), experiment=rd("experiment.md"),
         report=rd("report.md"), log=rd("stdout.log"), figures=figures,
     )
 
@@ -1156,6 +1305,40 @@ def delete_hypothesis_node(store: Store, idea_id: str, hid: str) -> HypothesisMa
             shutil.rmtree(hdir, ignore_errors=True)
     data["ideaId"] = idea_id
     return HypothesisMap.model_validate(data)
+
+
+def add_child_hypothesis(store: Store, idea_id: str, parent_hid: str, statement: str) -> HypothesisMap:
+    """Manually add a sub-hypothesis under a parent node (the graph's right-click 'add
+    sub-hypothesis'). Reuses the chat hypothesis tool's id scheme + persistence, then returns
+    the refreshed map."""
+    idea_path = store.idea_path(idea_id)
+    if idea_path is None:
+        raise NotFound("Idea not found")
+    from paperclaw.tools import hypothesis as _hyp
+    res = _hyp.add(idea_path, {"parent_id": (parent_hid or "").strip(), "statement": statement})
+    if res.startswith("Error"):
+        raise NotFound(res)
+    return get_hypothesis_map(store, idea_id)
+
+
+def rerun_hypothesis_experiment(store: Store, idea_id: str, hid: str) -> dict:
+    """Clear a hypothesis's experiment + verdict artifacts, reset it to untested, and start a
+    FRESH detached experiment job (the graph's right-click 'rerun / retest', e.g. when a run
+    came back INCONCLUSIVE). Cancels any in-flight job first."""
+    idea_path = store.idea_path(idea_id)
+    if idea_path is None:
+        raise NotFound("Idea not found")
+    if not re.fullmatch(r"[A-Za-z0-9.]+", hid or "") or ".." in (hid or ""):
+        raise NotFound("Hypothesis not found")
+    hdir = idea_path / "hypotheses" / hid
+    if not hdir.is_dir():
+        raise NotFound("Hypothesis not found")
+    from paperclaw import iterative_pipeline as ip, jobs
+    jobs.cancel_experiment_job(store, idea_id, hid)  # stop any running job before clearing
+    for name in ("results.json", "experiment.md", "report.md", "events.jsonl"):
+        (hdir / name).unlink(missing_ok=True)
+    ip._set_node_status(store, idea_id, hid, "untested")  # so the verdict is recomputed
+    return jobs.start_experiment_job(store, idea_id, hid)
 
 
 # ── Hardware / environment ────────────────────────────────────────────────────
@@ -1416,6 +1599,87 @@ def save_writing_style(store: Store, name: str, content: str,
     return writing_styles.save_style(store.home, domain_dir, name, content)
 
 
+# ── Benchmark templates (fixed protocol + published, cited baselines) ─────────
+
+def list_benchmarks(store: Store, domain_id: str | None = None) -> list[dict]:
+    """Available benchmark templates — global + (optionally) a domain's, as dicts."""
+    domain_dir = store.domain_path(domain_id) if domain_id else None
+    return benchmarks.list_benchmarks(store.home, domain_dir)
+
+
+def get_benchmark(store: Store, domain_id: str | None, name: str) -> str | None:
+    """A benchmark template's markdown (domain-scoped first, then global)."""
+    domain_dir = store.domain_path(domain_id) if domain_id else None
+    return benchmarks.get_benchmark(store.home, domain_dir, name)
+
+
+def resolve_benchmark(store: Store, domain_id: str | None, name: str | None) -> str | None:
+    """The benchmark markdown to apply for a run: a chosen NAME (domain-first); if no name
+    is given, the domain's SOLE benchmark when it has exactly one (else None — no benchmark)."""
+    if name:
+        return get_benchmark(store, domain_id, name)
+    if domain_id:
+        domain_only = [b for b in list_benchmarks(store, domain_id) if b["scope"] == "domain"]
+        if len(domain_only) == 1:
+            return get_benchmark(store, domain_id, domain_only[0]["name"])
+    return None
+
+
+def save_benchmark(store: Store, name: str, content: str,
+                   domain_id: str | None = None) -> str | None:
+    domain_dir = store.domain_path(domain_id) if domain_id else None
+    return benchmarks.save_benchmark(store.home, domain_dir, name, content)
+
+
+def _idea_benchmark_md(store: Store, idea_id: str) -> str | None:
+    """The benchmark markdown in force for an idea — the persisted ``.benchmark.md`` the
+    pipeline writes for the run (so a DETACHED experiment job sees it), else the idea's
+    domain default benchmark, else None."""
+    idea_path = store.idea_path(idea_id)
+    if idea_path is not None:
+        f = idea_path / ".benchmark.md"
+        if f.is_file():
+            return f.read_text(encoding="utf-8", errors="ignore")
+    return resolve_benchmark(store, resolve_domain_id_for_idea(store, idea_id), None)
+
+
+def idea_benchmark_note(store: Store, idea_id: str) -> str:
+    """The BENCHMARK_NOTE-wrapped benchmark for an idea, or '' — used to reframe the
+    plan/experiment context wherever it's rebuilt from disk (not via the pipeline's
+    in-process base_ctx)."""
+    from paperclaw.prompts.benchmarks import BENCHMARK_NOTE
+    md = _idea_benchmark_md(store, idea_id)
+    return BENCHMARK_NOTE.replace("{benchmark}", md) if md else ""
+
+
+def list_idea_benchmarks(store: Store, idea_id: str) -> list[dict]:
+    """Benchmark templates available to an idea (for the Spec tab's Benchmark picker):
+    its OWN benchmarks/ (idea scope, e.g. from /setup_benchmark in the idea chat) + its
+    pinned domain's + global."""
+    idea_dir = store.idea_path(idea_id)
+    domain_id = resolve_domain_id_for_idea(store, idea_id)
+    domain_dir = store.domain_path(domain_id) if domain_id else None
+    return benchmarks.list_benchmarks(store.home, domain_dir, idea_dir)
+
+
+def get_idea_benchmark(store: Store, idea_id: str, name: str | None = None) -> dict:
+    """A benchmark for the Spec tab's Benchmark view: a specific *name* (idea > domain >
+    global) when given, else the one in FORCE for the idea (persisted .benchmark.md, or the
+    domain's sole one). ``{"name": <title or None>, "content": <markdown or None>}``."""
+    if name:
+        idea_dir = store.idea_path(idea_id)
+        domain_id = resolve_domain_id_for_idea(store, idea_id)
+        domain_dir = store.domain_path(domain_id) if domain_id else None
+        md = benchmarks.get_benchmark(store.home, domain_dir, name, idea_dir=idea_dir)
+    else:
+        md = _idea_benchmark_md(store, idea_id)
+    title = None
+    if md:
+        m = re.search(r"^#\s+(.+)$", md, re.MULTILINE)
+        title = m.group(1).strip() if m else None
+    return {"name": title, "content": md}
+
+
 def upload_venue_file(store: Store, idea_id: str, filename: str, data: bytes) -> dict:
     """Place an uploaded LaTeX venue template into the idea's ``venue/`` dir — a
     ``.zip`` (e.g. an Overleaf export) is extracted, a single ``.sty/.cls/.tex/.bst/
@@ -1463,16 +1727,91 @@ def _extract_style_arg(text: str) -> tuple[str, str | None]:
     return cleaned, m.group(1)
 
 
-def resolve_domain_id_for_idea(store: Store, idea_id: str | None) -> str | None:
-    """The id of the domain an idea is pinned to (by name appearing in IDEA.md)."""
-    spec = store.get_spec(idea_id) if idea_id else None
+def resolve_domain_ids_for_idea(store: Store, idea_id: str | None) -> list[str]:
+    """The ids of the domains an idea is connected to. An idea may connect to SEVERAL.
+    EXPLICIT connections (`.domains.json`, set via the picker / on brainstorm) are
+    authoritative; with none recorded, fall back to name-matching every domain whose
+    name appears in IDEA.md (so older / brainstorm-drafted ideas are auto-connected)."""
+    if not idea_id:
+        return []
+    explicit = store.get_idea_domain_ids(idea_id)
+    if explicit is not None:  # connected at least once (may be an explicit empty list)
+        return [d for d in explicit if store.domain_path(d) is not None]
+    spec = store.get_spec(idea_id)
     if not spec:
-        return None
+        return []
     low = spec.lower()
-    for domain in store.list_domains():
-        if domain.name and domain.name.lower() in low:
-            return domain.id
-    return None
+    return [d.id for d in store.list_domains() if d.name and d.name.lower() in low]
+
+
+def resolve_domain_id_for_idea(store: Store, idea_id: str | None) -> str | None:
+    """The idea's PRIMARY (first) connected domain id, or None. Single-domain callers
+    (pipeline context, benchmark default) use this; see resolve_domain_ids_for_idea."""
+    ids = resolve_domain_ids_for_idea(store, idea_id)
+    return ids[0] if ids else None
+
+
+def get_idea_domains(store: Store, idea_id: str) -> dict:
+    """The idea's connected domain ids, for the connect UI → {ideaId, domainIds}."""
+    if store.idea_path(idea_id) is None:
+        raise NotFound("Idea not found")
+    return {"ideaId": idea_id, "domainIds": resolve_domain_ids_for_idea(store, idea_id)}
+
+
+def set_idea_domains(store: Store, idea_id: str, domain_ids: list[str]) -> dict:
+    """Explicitly connect an idea to a set of domains (the picker). Validates the ids and
+    persists `.domains.json` (authoritative from now on); the connected domains are surfaced
+    to the chat agent in its system prompt (inlined DOMAIN.md + abs paths read via `bash`).
+    Returns {ideaId, domainIds}."""
+    if store.idea_path(idea_id) is None:
+        raise NotFound("Idea not found")
+    valid = [d for d in domain_ids if store.domain_path(d) is not None]
+    store.set_idea_domain_ids(idea_id, valid)
+    _cleanup_domain_mounts(store, idea_id)  # retire any stale symlinks from the old scheme
+    return {"ideaId": idea_id, "domainIds": valid}
+
+
+_EXP_MODES = ("simulated", "executed", "ssh", "cli")
+
+
+def get_idea_resources_view(store: Store, settings: LLMSettings, idea_id: str) -> dict:
+    """The idea's allocated experiment resources for the Resources sub-tab: the EFFECTIVE
+    compute (mode + SSH GPU host every experiment uses), the SSH remotes to choose from, and
+    the active LLM (read-only; key shown as configured, never its value)."""
+    if store.idea_path(idea_id) is None:
+        raise NotFound("Idea not found")
+    cfg = store.effective_run_config(idea_id)
+    alloc = store.get_idea_resources(idea_id) or {}
+    return {
+        "ideaId": idea_id,
+        "experimentMode": cfg.experiment_mode,
+        "sshTargetId": cfg.ssh_target_id,
+        "useReferenceCodebase": bool(alloc.get("useReferenceCodebase", True)),
+        "sshTargets": store.get_hardware_state().get("sshTargets", []),
+        "llmProvider": settings.provider,
+        "llmModel": settings.model,
+        "llmBaseUrl": settings.base_url,
+        "llmKeyConfigured": bool(settings.api_key),
+    }
+
+
+def set_idea_resources(store: Store, idea_id: str, *, experiment_mode=None, ssh_target_id=None,
+                       use_reference_codebase=None) -> None:
+    """Pin the idea's experiment resources (each omitted field is left unchanged). Every
+    experiment of this idea — auto OR manual from the Hypotheses tab — then runs with them
+    (via store.effective_run_config)."""
+    if store.idea_path(idea_id) is None:
+        raise NotFound("Idea not found")
+    alloc = store.get_idea_resources(idea_id) or {}
+    if experiment_mode is not None:
+        if experiment_mode and experiment_mode not in _EXP_MODES:
+            raise NotFound(f"invalid experiment mode: {experiment_mode}")
+        alloc["experimentMode"] = experiment_mode or None
+    if ssh_target_id is not None:
+        alloc["sshTargetId"] = ssh_target_id or None
+    if use_reference_codebase is not None:
+        alloc["useReferenceCodebase"] = bool(use_reference_codebase)
+    store.set_idea_resources(idea_id, alloc)
 
 
 def _setup_codebase_messages(store: Store, context_id: str, content: str,
@@ -1686,6 +2025,7 @@ async def stream_auto_research(
     experiment_mode: str | None = None,
     ssh_target_id: str | None = None,
     writing_style: str | None = None,
+    benchmark: str | None = None,
     use_reference_codebase: bool = True,
     fill_page: bool = False,
 ) -> AsyncIterator[dict]:
@@ -1709,7 +2049,7 @@ async def stream_auto_research(
         target_positive=target_positive, max_hypotheses=max_hypotheses, page_limit=page_limit,
         max_depth=max_depth,
         experiment_mode=experiment_mode, ssh_target_id=ssh_target_id,
-        writing_style=writing_style, use_reference_codebase=use_reference_codebase,
+        writing_style=writing_style, benchmark=benchmark, use_reference_codebase=use_reference_codebase,
         fill_page=fill_page,
     )):
         yield ev
@@ -1771,6 +2111,7 @@ async def stream_auto_idea(
     experiment_mode: str | None = None,
     ssh_target_id: str | None = None,
     writing_style: str | None = None,
+    benchmark: str | None = None,
     use_reference_codebase: bool = True,
     fill_page: bool = False,
 ) -> AsyncIterator[dict]:
@@ -1803,7 +2144,7 @@ async def stream_auto_idea(
             max_hypotheses=max_hypotheses, page_limit=page_limit, target_positive=target_positive,
             max_depth=max_depth,
             experiment_mode=experiment_mode, ssh_target_id=ssh_target_id,
-            writing_style=writing_style, use_reference_codebase=use_reference_codebase,
+            writing_style=writing_style, benchmark=benchmark, use_reference_codebase=use_reference_codebase,
             fill_page=fill_page):
             yield ev
 
@@ -1899,7 +2240,8 @@ def launch_auto_run(store: Store, home, topic: str = "", *, idea_id: str | None 
                     target_positive: int = 2, max_hypotheses: int = 6, page_limit: int = 8,
                     max_depth: int = 3,
                     experiment_mode: str | None = None, ssh_target_id: str | None = None,
-                    writing_style: str | None = None, use_reference_codebase: bool = True,
+                    writing_style: str | None = None, benchmark: str | None = None,
+                    use_reference_codebase: bool = True,
                     fill_page: bool = False) -> dict:
     """Start an auto run as a DETACHED process (so the web UI can launch one without
     holding a connection) and seed its status snapshot — the banner/`auto status` then
@@ -1919,6 +2261,8 @@ def launch_auto_run(store: Store, home, topic: str = "", *, idea_id: str | None 
         common += ["--ssh-target", ssh_target_id]
     if writing_style:
         common += ["--style", writing_style]
+    if benchmark:
+        common += ["--benchmark", benchmark]
     if not use_reference_codebase:
         common += ["--no-codebase"]
     if fill_page:
@@ -1982,6 +2326,7 @@ async def _auto_research_events(
     experiment_mode: str | None = None,
     ssh_target_id: str | None = None,
     writing_style: str | None = None,
+    benchmark: str | None = None,
     use_reference_codebase: bool = True,
     fill_page: bool = False,
 ) -> AsyncIterator[dict]:
@@ -2042,7 +2387,7 @@ async def _auto_research_events(
         max_hypotheses=max_hypotheses, page_limit=page_limit, target_positive=target_positive,
         max_depth=max_depth,
         experiment_mode=experiment_mode, ssh_target_id=ssh_target_id,
-        writing_style=writing_style, use_reference_codebase=use_reference_codebase,
+        writing_style=writing_style, benchmark=benchmark, use_reference_codebase=use_reference_codebase,
         fill_page=fill_page,
     ):
         yield ev
@@ -2285,6 +2630,9 @@ async def stream_chat_events(
     elif stripped.lower().startswith(SETUP_VENUE_COMMAND):
         rest = stripped[len(SETUP_VENUE_COMMAND):].strip()
         llm_content = "Set up the venue template." + SETUP_VENUE_DIRECTIVE.replace("{venue}", f" for {rest}" if rest else "")
+    elif stripped.lower().startswith(SETUP_BENCHMARK_COMMAND):
+        rest = stripped[len(SETUP_BENCHMARK_COMMAND):].strip()
+        llm_content = "Set up the benchmark template." + SETUP_BENCHMARK_DIRECTIVE.replace("{paper}", f" from {rest}" if rest else "")
 
     history = store.list_messages(context_id)[-HISTORY_LIMIT:]
     llm_messages = [
@@ -2325,19 +2673,37 @@ async def stream_chat_events(
     # text (used for block parsing/persistence) plus the files the tools wrote.
     full_text = ""
     stream_files_modified: frozenset[str] = frozenset()
+    # Accumulate the streamed activity feed so it can be PERSISTED with the message
+    # (otherwise the tool chain / thinking / plan vanish on reload — they're rebuilt
+    # only from live stream events).
+    acc_parts: list[dict] = []
+    acc_thinking = ""
+    acc_todos: list[dict] = []
+
+    def _acc_text(t: str) -> None:
+        if acc_parts and acc_parts[-1].get("kind") == "text":
+            acc_parts[-1]["text"] += t
+        else:
+            acc_parts.append({"kind": "text", "text": t})
+
     try:
         if use_deep:
             try:
                 async for ev in deep_chat.stream_deep_chat(settings, base_dir, system, llm_messages):
                     t = ev["type"]
                     if t == "delta":
+                        _acc_text(ev["text"])
                         yield {"type": "delta", "text": ev["text"]}
                     elif t == "thinking":
+                        acc_thinking += ev["text"]
                         yield {"type": "thinking", "text": ev["text"]}
                     elif t == "tool":  # chained tool-call feed for the UI
+                        acc_parts.append({"kind": "tool", "name": ev["name"],
+                                          "arg": ev.get("arg", ""), "detail": ev.get("detail", "")})
                         yield {"type": "tool", "name": ev["name"],
                                "arg": ev.get("arg", ""), "detail": ev.get("detail", "")}
                     elif t == "todos":  # the agent's write_todos plan/checklist
+                        acc_todos = list(ev["todos"])
                         yield {"type": "todos", "todos": ev["todos"]}
                     elif t == "final":
                         full_text = ev["text"]
@@ -2345,10 +2711,14 @@ async def stream_chat_events(
             except (llm.LLMNotConfigured, llm.LLMError):
                 raise  # handled below with a friendly message
             except Exception as exc:  # deepagents/LangChain failure — don't crash chat
+                # KEEP the partial work (text + tool feed + thinking) + a resume-oriented note,
+                # so the conversation isn't wiped to a one-line error and "continue" can resume.
                 assistant = store.add_message(
                     context_id, "assistant",
-                    f"⚠️ The deepagents chat editor failed ({type(exc).__name__}: {exc}). "
-                    "Check the model config, or set chat_agent back to 'builtin' in Settings/.env.",
+                    _interrupted_chat_message(acc_parts, exc, deep=True),
+                    thinking=acc_thinking or None,
+                    parts=acc_parts or None,
+                    todos=acc_todos or None,
                 )
                 yield {"type": "done", "messages": [_msg_dump(user_msg), _msg_dump(assistant)]}
                 return
@@ -2372,7 +2742,12 @@ async def stream_chat_events(
         yield {"type": "done", "messages": [_msg_dump(user_msg), _msg_dump(assistant)]}
         return
     except llm.LLMError as exc:
-        assistant = store.add_message(context_id, "assistant", f"⚠️ {exc}")
+        assistant = store.add_message(
+            context_id, "assistant",
+            _interrupted_chat_message(acc_parts, exc, deep=False),  # partial work + resume note
+            thinking=acc_thinking or None,   # KEEP the partial feed so it survives a reload
+            parts=acc_parts or None, todos=acc_todos or None,
+        )
         yield {"type": "done", "messages": [_msg_dump(user_msg), _msg_dump(assistant)]}
         return
 
@@ -2448,6 +2823,9 @@ async def stream_chat_events(
 
     reply, question = _extract_question(reply)
 
+    # Persist the streamed activity feed so it survives a reload: keep the tool TIMELINE
+    # only when there actually were tool calls (else the plain text in `content` suffices).
+    persist_parts = acc_parts if any(p.get("kind") == "tool" for p in acc_parts) else None
     assistant = store.add_message(
         context_id, "assistant", reply,
         spec_updated=spec_updated,
@@ -2457,6 +2835,9 @@ async def stream_chat_events(
         created_idea_id=created_idea_id,
         created_domain_id=created_domain_id,
         question=question,
+        thinking=acc_thinking or None,
+        parts=persist_parts,
+        todos=acc_todos or None,
     )
 
     if created_domain_id and context_id == SCRATCH_ID:

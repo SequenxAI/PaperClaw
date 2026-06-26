@@ -10,6 +10,7 @@ GENERATE_REPORT_COMMAND = "/generate_report"
 WRITE_PAPER_COMMAND = "/write_paper"
 SETUP_VENUE_COMMAND = "/setup_venue"
 SETUP_CODEBASE_COMMAND = "/setup_codebase"
+SETUP_BENCHMARK_COMMAND = "/setup_benchmark"
 VALIDATE_REFERENCES_COMMAND = "/validate_references"
 
 SKILLS: list[Skill] = [
@@ -52,5 +53,9 @@ SKILLS: list[Skill] = [
     Skill(
         command=SETUP_CODEBASE_COMMAND,
         description="Set a domain's reference codebase: /setup_codebase <github-url> (downloads it for experiments)",
+    ),
+    Skill(
+        command=SETUP_BENCHMARK_COMMAND,
+        description="Build a domain's benchmark template from a paper: /setup_benchmark <arxiv|url|title> (run in a domain chat)",
     ),
 ]

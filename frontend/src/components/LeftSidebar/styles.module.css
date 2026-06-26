@@ -636,3 +636,30 @@
 }
 
 .autoRunBtn:hover { background: var(--accent); color: #fff; }
+
+/* Idea flag colours (context menu) */
+.ctxFlags {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+}
+.ctxFlagLabel {
+  font-size: var(--fs-xs);
+  color: var(--text-secondary);
+}
+.ctxFlagDot {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  border: 1px solid var(--border-subtle);
+  cursor: pointer;
+  padding: 0;
+}
+.ctxFlagClear {
+  font-size: var(--fs-xs);
+  color: var(--text-secondary);
+  background: none;
+  border: none;
+  cursor: pointer;
+}

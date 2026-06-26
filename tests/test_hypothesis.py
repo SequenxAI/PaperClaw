@@ -167,11 +167,15 @@ def test_hypothesis_detail_includes_code_and_run_output(tmp_path):
     hdir = store.idea_path(idea.id) / "hypotheses" / "H1"
     hdir.mkdir(parents=True)
     (hdir / "run.py").write_text("print('hi')")          # phase 1
+    (hdir / "model.py").write_text("W = 0")               # multi-file code (executed/cli)
     (hdir / "stdout.log").write_text("hi")               # run log
     (hdir / "experiment.md").write_text("## results\nok")  # phase 2
 
     d = service.get_hypothesis_detail(store, idea.id, "H1")
-    assert d.code == "print('hi')"
+    # the code view aggregates ALL the agent's code files (consistent across run modes),
+    # each with a header — not just run.py
+    assert "print('hi')" in d.code and "W = 0" in d.code
+    assert "# ===== run.py =====" in d.code and "# ===== model.py =====" in d.code
     assert d.experiment == "## results\nok"
     assert d.log == "hi" and d.status == "supported"
 
@@ -273,10 +277,9 @@ def test_autoexpand_from_report_noop_without_verdict(tmp_path, monkeypatch):
     assert store.get_hypothesis_map(idea_id)["nodes"][0]["status"] == "untested"
 
 
-def test_idea_chat_injects_pinned_domain_spec(tmp_path):
-    """The idea conversation agent is sandboxed to the idea folder and can't open
-    domains/<id>/DOMAIN.md, so the pinned domain's spec is injected into its system
-    prompt as read-only reference (giving it the field's literature with authors/year)."""
+def test_idea_chat_injects_connected_domain(tmp_path):
+    """Connected domains are surfaced to the idea chat as inlined DOMAIN.md + the domain's
+    absolute path (read via bash — NOT a symlink, which the deepagents sandbox rejects)."""
     from paperclaw import service
     from paperclaw.server.store import Store
 
@@ -286,16 +289,112 @@ def test_idea_chat_injects_pinned_domain_spec(tmp_path):
     idea = store.add_idea("TS idea")
     store.put_spec(idea.id, "# TS idea\n\n## Domain & Literature\nPinned to Time Series Forecasting.\n")
 
-    # pinned idea → the domain's DOMAIN.md (incl. authors/year) + its PATH are in the prompt
-    sysp = service._idea_chat_system(store, idea.id, store.get_spec(idea.id))
-    assert "NsDiff (Smith et al., 2024)" in sysp
-    assert "READ-ONLY reference" in sysp
-    assert f"domains/{dom.id}/DOMAIN.md" in sysp  # the path is included
+    # a stale symlink from the OLD mount scheme must be cleaned up (it crashed the agent)
+    stale = store.idea_path(idea.id) / "domains"; stale.mkdir()
+    (stale / "x").symlink_to(store.domain_path(dom.id).resolve(), target_is_directory=True)
 
-    # an unpinned idea gets no domain block
+    sysp = service._idea_chat_system(store, idea.id, store.get_spec(idea.id))
+    assert "NsDiff (Smith et al., 2024)" in sysp                       # DOMAIN.md inlined
+    assert "READ-ONLY" in sysp and "bash" in sysp                      # read with bash, not read_file
+    assert str(store.domain_path(dom.id)) in sysp                      # the domain's abs path is given
+    assert not (store.idea_path(idea.id) / "domains").exists()         # stale symlink mount removed
+
+    # an unconnected idea gets no domain block
     other = store.add_idea("Unrelated")
     store.put_spec(other.id, "# Unrelated\n\nNo domain here.\n")
-    assert "READ-ONLY reference" not in service._idea_chat_system(store, other.id, store.get_spec(other.id))
+    assert "READ-ONLY" not in service._idea_chat_system(store, other.id, store.get_spec(other.id))
+
+
+def test_idea_connect_multiple_domains(tmp_path):
+    """An idea can connect to SEVERAL domains explicitly (the picker / PUT); the explicit
+    set is authoritative over name-matching, and an empty set disconnects."""
+    from paperclaw import service
+    from paperclaw.server.store import Store
+
+    store = Store(tmp_path)
+    d1 = store.add_domain("Time Series"); store.put_domain_spec(d1.id, "# TS\nx\n")
+    d2 = store.add_domain("Diffusion"); store.put_domain_spec(d2.id, "# Diff\ny\n")
+    idea = store.add_idea("Idea"); store.put_spec(idea.id, "# Idea\n\nMentions Time Series only.\n")
+
+    assert service.resolve_domain_ids_for_idea(store, idea.id) == [d1.id]   # fallback: name-match
+    service.set_idea_domains(store, idea.id, [d1.id, d2.id])                 # explicit: connect both
+    assert set(service.resolve_domain_ids_for_idea(store, idea.id)) == {d1.id, d2.id}
+    # both DOMAIN.md inlined into the chat system prompt
+    sysp = service._idea_chat_system(store, idea.id, store.get_spec(idea.id))
+    assert "# TS" in sysp and "# Diff" in sysp
+
+    service.set_idea_domains(store, idea.id, [])                            # explicit empty → disconnect all
+    assert service.resolve_domain_ids_for_idea(store, idea.id) == []        # NOT resurrected by name-match
+
+
+def test_add_child_and_rerun_hypothesis(tmp_path, monkeypatch):
+    """Right-click → Add sub-hypothesis appends a child under a node; Rerun clears the node's
+    experiment + verdict artifacts, resets it to untested, and starts a fresh job."""
+    from paperclaw import service, jobs
+    from paperclaw.server.store import Store
+
+    store = Store(tmp_path)
+    idea = store.add_idea("Idea"); store.put_spec(idea.id, "# Idea\n")
+    store.put_hypothesis_map(idea.id, {"nodes": [
+        {"id": "H1", "statement": "root claim", "status": "inconclusive", "children": []}]})
+
+    # add a sub-hypothesis under H1
+    m = service.add_child_hypothesis(store, idea.id, "H1", "a sub claim")
+    h1 = next(n for n in m.nodes if n.id == "H1")
+    assert any(c.statement == "a sub claim" for c in h1.children)
+
+    # rerun: clear artifacts + reset status + start a (mocked) detached job
+    hdir = store.idea_path(idea.id) / "hypotheses" / "H1"; hdir.mkdir(parents=True)
+    (hdir / "results.json").write_text("{}")
+    (hdir / "experiment.md").write_text("old"); (hdir / "report.md").write_text("REFUTED")
+    calls = {}
+
+    def fake_start(*a, **k):
+        calls["started"] = True
+        return {"jobId": "j1", "status": "running"}
+
+    monkeypatch.setattr(jobs, "start_experiment_job", fake_start)
+    monkeypatch.setattr(jobs, "cancel_experiment_job", lambda *a, **k: None)
+    job = service.rerun_hypothesis_experiment(store, idea.id, "H1")
+    assert job["jobId"] == "j1" and calls.get("started")
+    assert not (hdir / "results.json").exists() and not (hdir / "experiment.md").exists()  # cleared
+    assert next(n for n in service.get_hypothesis_map(store, idea.id).nodes if n.id == "H1").status == "untested"
+
+
+def test_codebase_resolves_via_explicit_connection(tmp_path):
+    """The reference codebase resolves through an EXPLICIT domain connection even when the
+    spec doesn't NAME the domain, and skips a connected domain that has no repo."""
+    from paperclaw import iterative_pipeline as ip
+    from paperclaw.server.store import Store
+
+    store = Store(tmp_path)
+    d1 = store.add_domain("Empty Domain")                       # connected but NO codebase
+    d2 = store.add_domain("Repo Domain")
+    cb = store.domain_codebase_dir(d2.id); cb.mkdir(parents=True, exist_ok=True)
+    (cb / "model.py").write_text("# reference model\n")
+    idea = store.add_idea("Idea"); store.put_spec(idea.id, "# Idea\n\nno domain named here\n")
+
+    assert ip._resolve_domain_codebase(store, idea.id, store.get_spec(idea.id)) is None  # nothing yet
+    store.set_idea_domain_ids(idea.id, [d1.id, d2.id])          # connect both (d1 first, no repo)
+    got = ip._resolve_domain_codebase(store, idea.id, store.get_spec(idea.id))
+    assert got is not None and got == store.domain_codebase_path(d2.id)  # skips d1, finds d2's repo
+
+
+def test_idea_domains_route(tmp_path):
+    """GET/PUT /api/ideas/{id}/domains connect an idea to domains (dropping unknown ids)."""
+    from fastapi.testclient import TestClient
+    from paperclaw.server.app import create_app
+    from paperclaw.server.store import Store
+
+    store = Store(tmp_path)
+    d = store.add_domain("My Domain")
+    idea = store.add_idea("Idea"); store.put_spec(idea.id, "# Idea\n\nnothing\n")
+    c = TestClient(create_app(home=tmp_path))
+    assert c.get(f"/api/ideas/{idea.id}/domains").json() == {"ideaId": idea.id, "domainIds": []}
+    r = c.put(f"/api/ideas/{idea.id}/domains", json={"domainIds": [d.id, "bogus"]}).json()
+    assert r == {"ideaId": idea.id, "domainIds": [d.id]}                    # bogus dropped
+    assert c.get(f"/api/ideas/{idea.id}/domains").json()["domainIds"] == [d.id]
+    assert c.get("/api/ideas/nope/domains").status_code == 404
 
 
 def test_hypothesis_map_stage_reflects_progress(tmp_path):

@@ -46,6 +46,9 @@ class Idea(BaseModel):
     description: Optional[str] = None
     created_at: float = Field(alias="createdAt")
     is_active: bool = Field(default=False, alias="isActive")
+    # A user flag/label colour for the sidebar (e.g. green = done, yellow = in progress,
+    # grey = parked). None = unflagged.
+    color: Optional[str] = None
 
     model_config = {"populate_by_name": True}
 
@@ -53,6 +56,51 @@ class Idea(BaseModel):
 class IdeaSpec(BaseModel):
     idea_id: str = Field(alias="ideaId")
     content: str
+
+    model_config = {"populate_by_name": True}
+
+
+class IdeaDomains(BaseModel):
+    """The domains an idea is connected to (an idea may connect to several)."""
+
+    idea_id: str = Field(alias="ideaId")
+    domain_ids: list[str] = Field(default_factory=list, alias="domainIds")
+
+    model_config = {"populate_by_name": True}
+
+
+class IdeaDomainsUpdate(BaseModel):
+    """Request body to set an idea's connected domains."""
+
+    domain_ids: list[str] = Field(default_factory=list, alias="domainIds")
+
+    model_config = {"populate_by_name": True}
+
+
+class IdeaResources(BaseModel):
+    """An idea's allocated experiment resources — the compute (mode + SSH GPU host) every
+    experiment of this idea uses (auto OR manual), plus the active LLM (read-only) and the
+    SSH remotes available to pick from."""
+
+    idea_id: str = Field(alias="ideaId")
+    experiment_mode: Optional[str] = Field(default=None, alias="experimentMode")
+    ssh_target_id: Optional[str] = Field(default=None, alias="sshTargetId")
+    use_reference_codebase: bool = Field(default=True, alias="useReferenceCodebase")
+    ssh_targets: list["SSHTarget"] = Field(default_factory=list, alias="sshTargets")
+    llm_provider: Optional[str] = Field(default=None, alias="llmProvider")
+    llm_model: Optional[str] = Field(default=None, alias="llmModel")
+    llm_base_url: Optional[str] = Field(default=None, alias="llmBaseUrl")
+    llm_key_configured: bool = Field(default=False, alias="llmKeyConfigured")
+
+    model_config = {"populate_by_name": True}
+
+
+class IdeaResourcesUpdate(BaseModel):
+    """Request body to set an idea's allocated resources (any omitted field is unchanged)."""
+
+    experiment_mode: Optional[str] = Field(default=None, alias="experimentMode")
+    ssh_target_id: Optional[str] = Field(default=None, alias="sshTargetId")
+    use_reference_codebase: Optional[bool] = Field(default=None, alias="useReferenceCodebase")
 
     model_config = {"populate_by_name": True}
 
@@ -88,6 +136,11 @@ class Message(BaseModel):
     created_idea_id: Optional[str] = Field(default=None, alias="createdIdeaId")
     created_domain_id: Optional[str] = Field(default=None, alias="createdDomainId")
     question: Optional[dict] = None  # {"prompt", "options", "allowFreeText"}
+    # Streamed activity feed, PERSISTED so it survives a reload / context switch:
+    # the chained tool-call timeline (text + tool rows), the reasoning, and the plan.
+    thinking: Optional[str] = None
+    parts: Optional[list[dict]] = None   # [{kind:"text",text} | {kind:"tool",name,arg?,detail?}]
+    todos: Optional[list[dict]] = None   # [{content, status}]
 
     model_config = {"populate_by_name": True}
 
@@ -306,6 +359,16 @@ class WritingStyle(BaseModel):
     model_config = {"populate_by_name": True}
 
 
+class Benchmark(BaseModel):
+    """A benchmark template — a fixed protocol + a published, cited leaderboard."""
+
+    name: str
+    scope: str  # "global" | "domain"
+    title: str
+
+    model_config = {"populate_by_name": True}
+
+
 # ── Experiment jobs (detached, monitored) ────────────────────────────────────
 
 
@@ -389,6 +452,7 @@ class AutoRunStart(BaseModel):
     experiment_mode: Optional[str] = Field(default=None, alias="experimentMode")
     ssh_target_id: Optional[str] = Field(default=None, alias="sshTargetId")
     writing_style: Optional[str] = Field(default=None, alias="writingStyle")
+    benchmark: Optional[str] = Field(default=None, alias="benchmark")  # benchmark template name
     use_reference_codebase: bool = Field(default=True, alias="useReferenceCodebase")
     # iteratively verify (read_pdf) the main text fills the page limit (ends at the
     # last allowed page) — the paper page-fill compliance check.
@@ -453,15 +517,18 @@ class HardwareInfo(BaseModel):
 
 class RunConfig(BaseModel):
     """How experiment code is executed. ``simulated`` keeps the original
-    LLM-narrated pipeline; ``executed`` runs real generated code on the local host;
-    ``ssh`` runs it on a configured SSH remote (``ssh_target_id`` selects which one —
-    defaults to the first); ``cli`` shells out to an external headless coding-agent CLI
-    (``agent_command``, e.g. ``claude`` / ``opencode`` / ``openhands``) and streams its
-    stdout live. Experiments run with NO wall-clock timeout (they can take hours)."""
+    LLM-narrated pipeline; ``executed`` runs the agentic coding agent on the local host;
+    ``ssh`` runs that SAME agentic bash loop ON a configured SSH remote — it needs only
+    ``ssh_target_id`` (the SSH connection; no interpreter / extra settings, since the agent
+    sets up the env and runs everything with bash on the remote); ``cli`` shells out to an
+    external headless coding-agent CLI (``agent_command``, e.g. ``claude`` / ``opencode`` /
+    ``openhands``) and streams its stdout live. Experiments run with NO wall-clock timeout."""
 
     experiment_mode: Literal["simulated", "executed", "ssh", "cli"] = Field(
         default="simulated", alias="experimentMode"
     )
+    # Interpreter for the legacy single-shot runners only; NOT used by the agentic
+    # `executed`/`ssh` loop (the agent runs python itself via bash on its host).
     python_path: Optional[str] = Field(default=None, alias="pythonPath")  # None = backend/remote default
     ssh_target_id: Optional[str] = Field(default=None, alias="sshTargetId")
     # Shell command template for ``cli`` mode. Placeholders: {prompt} (shell-quoted

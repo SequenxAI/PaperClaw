@@ -35,6 +35,7 @@ interface Props {
   onRemoveIdea: (id: string) => void
   onRevealIdea: (id: string) => void
   onDuplicateIdea: (id: string) => void
+  onSetIdeaColor: (id: string, color: string | null) => void
   onOpenSettings: () => void
   onOpenAutoLauncher?: () => void
   theme: 'dark' | 'light'
@@ -46,7 +47,7 @@ export default function LeftSidebar({
   activeSeedId, viewDomainId,
   onAutoDomain, onStartDomainWizard, onSelectDomain, onViewDomain, onRemoveDomain, onSetDomainCodebase,
   onAddSeed, onRemoveSeed, onGenerateSeeds, brainstormOpts, onBrainstormOptsChange, onOpenSeed, onPromoteSeed,
-  onAddIdea, onSetActiveIdea, onRemoveIdea, onRevealIdea, onDuplicateIdea,
+  onAddIdea, onSetActiveIdea, onRemoveIdea, onRevealIdea, onDuplicateIdea, onSetIdeaColor,
   onOpenSettings, onOpenAutoLauncher, theme, onToggleTheme
 }: Props) {
   const [domainsOpen, setDomainsOpen] = useState(true)
@@ -110,6 +111,7 @@ export default function LeftSidebar({
           onRemove={onRemoveIdea}
           onReveal={onRevealIdea}
           onDuplicate={onDuplicateIdea}
+          onSetColor={onSetIdeaColor}
         />
       </div>
 

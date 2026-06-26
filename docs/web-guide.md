@@ -70,10 +70,19 @@ Hypotheses, and more. Refine it in the chat box at the bottom (answer-first ques
 edits), then **pin** it: the draft and its conversation are promoted into a real **Idea** you
 can run experiments on.
 
+**Connect to domains.** At the top of the **Spec** panel, **🔗 Domains → Edit** connects the
+idea to one or more domains (brainstormed ideas are auto-connected to the domain they came
+from). Each connected domain is mounted read-only at `./domains/<name>/` in the idea's
+workspace, so the chat/experiment agent can read its `DOMAIN.md`, reference codebase,
+benchmarks, and any prior-run results.
+
 **CLI**
 ```bash
-paperclaw brainstorm pin <seed-id>     # promote a draft into a living idea
-paperclaw idea list                    # list pinned ideas + their ids
+paperclaw brainstorm pin <seed-id>           # promote a draft into a living idea
+paperclaw idea list                          # list pinned ideas + their ids
+paperclaw idea domains <idea-id>             # show connected domains
+paperclaw idea domains <idea-id> --add <domain-id>     # connect another domain
+paperclaw idea domains <idea-id> --set <id1>,<id2>     # set the connected set
 ```
 
 ---

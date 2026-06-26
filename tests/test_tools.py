@@ -240,3 +240,64 @@ def test_apply_diff_insertion_after_context():
     diff = "@@ -7,0 +8,1 @@\n ## Keywords\n+## Background\n"
     out = apply_patch.apply_diff(_IDEA, diff)
     assert "## Background\n" in out and "## Keywords\n" in out
+
+
+def test_bash_tool_runs_in_workspace_and_caps_output(tmp_path):
+    from paperclaw.tools import bash, ALL_TOOLS, EXECUTORS
+    assert any(t["name"] == "bash" for t in ALL_TOOLS) and "bash" in EXECUTORS  # registered
+    (tmp_path / "a.txt").write_text("x")
+    out = bash.execute(tmp_path, {"command": "echo hi && ls"})
+    assert "(exit 0)" in out and "hi" in out and "a.txt" in out   # ran in the workspace dir
+    assert bash.execute(tmp_path, {"command": ""}).startswith("Error")
+    assert "exit 1" in bash.execute(tmp_path, {"command": "exit 1"})
+
+
+def test_bash_background_job_launches_polls_and_finishes(tmp_path):
+    """bash(run_in_background) launches a DETACHED job (returns a job id immediately) that
+    bash_output polls: running → done+exit-code, with output captured. Survives the turn."""
+    import time
+    from paperclaw.tools import bash, bash_output, ALL_TOOLS, EXECUTORS
+    assert any(t["name"] == "bash_output" for t in ALL_TOOLS) and "bash_output" in EXECUTORS
+    note = bash.execute(tmp_path, {"command": "echo go; sleep 1; echo done; exit 0",
+                                   "run_in_background": True})
+    assert "Started background job" in note
+    jid = note.split("`")[1]
+    assert "running" in bash_output.execute(tmp_path, {"job_id": jid})       # not blocking
+    time.sleep(1.4)
+    final = bash_output.execute(tmp_path, {"job_id": jid})
+    assert "done (exit 0)" in final and "go" in final and "done" in final    # exit code + output
+    # explicit non-zero exit is recorded (subshell isolates `exit`)
+    n2 = bash.execute(tmp_path, {"command": "exit 7", "run_in_background": True})
+    time.sleep(0.6)
+    assert "exit 7" in bash_output.execute(tmp_path, {"job_id": n2.split("`")[1]})
+    assert "No such" in bash_output.execute(tmp_path, {"job_id": "nope"})
+
+
+def test_list_exp_resources_reports_compute_and_masks_keys(tmp_path):
+    """list_exp_resources reports compute (local + SSH), experiment mode + remotes, and the LLM
+    — but NEVER the raw API key value."""
+    import json
+    from paperclaw.tools import list_exp_resources as ler, ALL_TOOLS, EXECUTORS
+    assert any(t["name"] == "list_exp_resources" for t in ALL_TOOLS) and "list_exp_resources" in EXECUTORS
+    home = tmp_path
+    (home / "HARDWARE.md").write_text("# Hardware\n- local: 4x A100\n")
+    (home / "hardware.json").write_text(json.dumps(
+        {"runConfig": {"experimentMode": "ssh", "sshTargetId": "gpu1"},
+         "sshTargets": [{"id": "gpu1", "host": "u@h"}]}))
+    (home / "settings.yaml").write_text(
+        "LLM:\n  provider: openai\n  api_key: sk-SECRET\n  model: gpt-5.5\n")
+    idea = home / "ideas" / "abc"; idea.mkdir(parents=True)
+    out = ler.execute(idea, {})
+    assert "4x A100" in out and "ssh" in out and "gpu1" in out      # compute + mode + remote
+    assert "gpt-5.5" in out and "configured" in out                  # LLM reported
+    assert "sk-SECRET" not in out                                    # key value NEVER leaked
+
+
+def test_chat_agent_has_bash_tool():
+    """The deepagents chat agent bridges a `bash` tool (so it can run shell, not just edit)."""
+    from paperclaw.agents import deep_chat
+    from paperclaw.config import LLMSettings
+    from pathlib import Path
+    names = [getattr(t, "__name__", getattr(t, "name", "")) for t in
+             deep_chat._workspace_tools(LLMSettings(), Path("/tmp"))]
+    assert "bash" in names

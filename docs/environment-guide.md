@@ -8,7 +8,9 @@ with one command. Every setting can be applied **three ways** (they share one ba
 - **CLI / env vars** — `paperclaw settings set …`, `paperclaw hardware …`, or `PAPERCLAW_*` env vars / `.env`.
 
 > **Precedence (highest first):** env vars → `.env` (cwd) → `.env` (`$PAPERCLAW_HOME`) →
-> `./settings.yaml` → `$PAPERCLAW_HOME/settings.yaml`. Secrets stay server-side (`saves/settings.yaml`, mode `600`) and are never sent to the browser.
+> `$PAPERCLAW_HOME/settings.yaml` (written by the Settings UI / `settings set`) →
+> `./settings.yaml` (project-dir DEFAULT). So a change saved in the Settings UI persists and
+> overrides the project-dir default. Secrets stay server-side (`saves/settings.yaml`, mode `600`) and are never sent to the browser.
 
 ### At a glance
 
@@ -20,6 +22,7 @@ with one command. Every setting can be applied **three ways** (they share one ba
 | [Experiment execution](#4-experiment-execution) | how experiments actually run | `paperclaw hardware run-config` |
 | [Hardware & SSH](#5-hardware--ssh-remotes) | detect CPU/GPU/mem; add remotes | `paperclaw hardware {detect,ssh-add}` |
 | [LaTeX toolchain](#6-latex-toolchain) | compile the paper to PDF | `tectonic` or TeX Live (auto-detected) |
+| [Benchmark templates](#8-benchmark-templates-optional) | beat published SOTA on a fixed protocol | `paperclaw benchmark` · `/setup_benchmark` |
 | [Doctor](#7-verify-with-the-doctor) | one-shot readiness check | `paperclaw doctor` |
 
 ---
@@ -104,15 +107,15 @@ paperclaw hardware run-config --mode cli           # show current with: papercla
 |---|---|
 | **`cli`** *(default, real)* | delegates each experiment to a headless coding-agent CLI (e.g. the `claude` CLI). Streams its output live; reads `results.json` when done. **Recommended.** |
 | **`executed`** *(real)* | drives the configured LLM in-process through a write→run→inspect→fix coding loop. Used automatically if `cli` is selected but its binary isn't on PATH. |
-| **`ssh`** *(🧪 beta, untested)* | same loop, but runs on a configured SSH remote. |
+| **`ssh`** *(🧪 beta)* | the **same agentic bash loop, run on a configured SSH remote** — the LLM authors code locally and runs everything with `bash` on the remote box (it sets up the env in a login shell), then `results.json` + figures are pulled back. Needs **only** the SSH remote — no interpreter or other settings. |
 | **`simulated`** *(NOT real)* | the LLM narrates **fabricated** results — nothing runs. For a quick demo only; avoid for real research. |
 
 ```bash
 # cli mode uses an external agent's own auth/model (inherited env), not settings.yaml:
 paperclaw hardware run-config --mode cli \
   --agent-command 'claude -p {prompt} --dangerously-skip-permissions'
-# executed/ssh mode: pick the python interpreter for the run
-paperclaw hardware run-config --mode executed --python /usr/bin/python3
+# ssh mode: just point at a remote you added (see §5) — that's the only setting it needs:
+paperclaw hardware run-config --mode ssh --ssh-target gpu-box
 ```
 
 > The `claude` CLI ([Claude Code](https://claude.com/claude-code)) is the recommended coding
@@ -162,6 +165,37 @@ paperclaw doctor        # exit 0 when ready, 1 otherwise
 ```
 
 In the web UI: **⚙️ Settings → 🩺 Doctor**.
+
+---
+
+## 8. Benchmark templates (optional)
+
+In fields like time-series forecasting, work is judged by **beating published SOTA on a standard
+benchmark** — and those competitor numbers are *already published*, so you cite them rather than
+re-run them. A **benchmark template** pins a fixed protocol + a published, cited leaderboard and
+reframes the whole run: the agent runs **only the new method** on that exact protocol and the
+paper's main results table reuses the **cited baseline rows + your measured row(s)**.
+
+A template is markdown with three sections — `## Protocol` (datasets / metric(s) / horizons /
+splits), `## Published results` (a table whose method rows carry a cite key), and `## References`
+(BibTeX for those keys). Templates are **per-domain** (reusable across the field's ideas), with a
+global fallback. The library starts **empty** — there's no default benchmark; you create one.
+
+```bash
+paperclaw benchmark list                          # your templates (global + domain) — empty at first
+paperclaw benchmark add ltsf --domain <id> --file ltsf.md   # paste your published table
+paperclaw benchmark show ltsf                      # view it
+paperclaw run --idea <id> --benchmark ltsf         # reframe the run around it
+```
+
+Two ways to fill one in (numbers must be **real** — never invented):
+- **Paste/upload** a results table (`paperclaw benchmark add`, or the 📊 picker's ⬆ in the Auto-run
+  settings) — you provide the values + citations.
+- **Extract from a paper** — in a **domain chat**, `/setup_benchmark <arxiv-id | url | title>`: the
+  agent reads the paper's table, writes `benchmarks/<name>.md`, and `cite`s the source.
+
+When a benchmark is active the run merges its cited BibTeX into the idea's `ref.bib` so the paper
+can `\cite` the baseline rows. Pick one per run in **⚡ Auto run → Benchmark**.
 
 ---
 

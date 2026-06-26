@@ -216,23 +216,46 @@ export default function App() {
   const [feedback, setFeedback] = useState<{ title: string; entries: FeedbackEntry[]; running: boolean } | null>(null)
   const [feedbackOpen, setFeedbackOpen] = useState(false)
   const fbSession = useRef(0)  // bumped per action, so a stale async tail stops pushing
+  // Streamed feedback is THROTTLED: tokens buffer in a ref and flush to state ~10×/s, so a
+  // long stream (e.g. a multi-draft brainstorm = thousands of deltas) doesn't re-render the
+  // whole app per token and freeze the UI (you couldn't even click Pin during a brainstorm).
+  const fbBuf = useRef<[FeedbackEntry['kind'], string][]>([])
+  const fbTimer = useRef<number | null>(null)
+  const fbFlush = useCallback(() => {
+    fbTimer.current = null
+    const buf = fbBuf.current
+    if (!buf.length) return
+    fbBuf.current = []
+    setFeedback(f => {
+      if (!f) return f
+      const entries = f.entries.slice()
+      for (const [kind, text] of buf) {
+        const last = entries[entries.length - 1]
+        if (last && last.kind === kind && kind !== 'step')  // grow thinking/text blocks
+          entries[entries.length - 1] = { ...last, text: last.text + text }
+        else
+          entries.push({ id: localId(), kind, text })
+      }
+      return { ...f, entries }
+    })
+  }, [])
   const fbStart = useCallback((title: string): number => {
     fbSession.current += 1
+    fbBuf.current = []
+    if (fbTimer.current != null) { clearTimeout(fbTimer.current); fbTimer.current = null }
     setFeedback({ title, entries: [], running: true })
     setFeedbackOpen(true)
     return fbSession.current
   }, [])
   const fbPush = useCallback((kind: FeedbackEntry['kind'], text: string) => {
     if (!text) return
-    setFeedback(f => {
-      if (!f) return f
-      const last = f.entries[f.entries.length - 1]
-      if (last && last.kind === kind && kind !== 'step')  // grow thinking/text blocks
-        return { ...f, entries: [...f.entries.slice(0, -1), { ...last, text: last.text + text }] }
-      return { ...f, entries: [...f.entries, { id: localId(), kind, text }] }
-    })
-  }, [])
-  const fbDone = useCallback(() => setFeedback(f => (f ? { ...f, running: false } : f)), [])
+    fbBuf.current.push([kind, text])
+    if (fbTimer.current == null) fbTimer.current = window.setTimeout(fbFlush, 90)
+  }, [fbFlush])
+  const fbDone = useCallback(() => {
+    fbFlush()  // flush any buffered tail before marking done
+    setFeedback(f => (f ? { ...f, running: false } : f))
+  }, [fbFlush])
 
   // Tail the active idea's detached auto run into the feedback panel while it runs.
   const autoActive = !!activeIdea && autoRun?.status === 'running' && autoRun.ideaId === activeIdea.id
@@ -266,7 +289,13 @@ export default function App() {
 
   // ── Conversation context: messages + idea spec/resources ─
   useEffect(() => {
-    api.getMessages(chatId).then(setMessages).catch(fail)
+    // Clear immediately so the PREVIOUS conversation's history doesn't linger under the new
+    // one, and guard the async result: if the user switches again before this resolves, a
+    // late response for the old chatId must NOT overwrite the new conversation (which made
+    // histories appear "mixed"). `pending`/streaming is keyed separately, so it's unaffected.
+    const forChat = chatId
+    setMessages([])
+    api.getMessages(chatId).then(m => { if (chatIdRef.current === forChat) setMessages(m) }).catch(fail)
     if (activeIdea) {
       api.getSpec(activeIdea.id).then(r => setIdeaSpec(r.content)).catch(fail)
       api.getResources(activeIdea.id).then(setResources).catch(fail)
@@ -523,6 +552,11 @@ export default function App() {
     api.deleteIdea(id).catch(fail)
   }
 
+  const setIdeaColor = (id: string, color: string | null) => {
+    setIdeas(prev => prev.map(i => (i.id === id ? { ...i, color } : i)))  // optimistic
+    api.setIdeaColor(id, color).catch(fail)
+  }
+
   const revealIdea = (id: string) => {
     api.revealIdea(id).then(loc => {
       navigator.clipboard?.writeText(loc.path).catch(() => {})
@@ -657,6 +691,7 @@ export default function App() {
     let accContent = ''
     let parts: MessagePart[] = []
     let todos: TodoItem[] = []
+    let finalized = false   // set once a terminal (done/error/abort) event resolves the stream
     const appendText = (t: string) => {
       const last = parts[parts.length - 1]
       parts = last && last.kind === 'text'
@@ -708,8 +743,10 @@ export default function App() {
             ])
           }
           afterReply(reply, ctx.seedId && reply.createdIdeaId ? ctx.seedId : undefined)
+          finalized = true
         } else if (ev.type === 'error') {
           failStream(`⚠️ ${ev.message as string}`)
+          finalized = true
         }
       }
     } catch (e) {
@@ -717,21 +754,26 @@ export default function App() {
       // instead of showing it as an error.
       if (stopped || abort.signal.aborted || (e as Error)?.name === 'AbortError') stopStream()
       else failStream(`⚠️ ${String((e as Error).message ?? e)}`)
+      finalized = true
     } finally {
+      // The stream ENDED without a terminal done/error event — the connection dropped or
+      // the server restarted (e.g. a dev --reload). Don't leave the placeholder spinning
+      // forever: finalize it, keeping whatever streamed, so the user can re-send.
+      if (!finalized)
+        failStream('⚠️ The connection closed before the reply finished — the server may have '
+          + 'restarted. Your message is saved; re-send to retry.')
       activeStreams.current[ctxId] = Math.max(0, (activeStreams.current[ctxId] ?? 1) - 1)
       if (chatAbort.current[ctxId] === abort) delete chatAbort.current[ctxId]
       // This conversation's reply finished — auto-send the next queued message
       // (sequential, Claude Code style). Only once no other stream is live here.
-      // A user Stop cancels the queue too (don't keep generating after Stop).
+      // Stop ends only the CURRENT reply; a QUEUED message still gets sent (the user
+      // typed it to run next), so drain the next one whether or not we were stopped.
       if (activeStreams.current[ctxId] === 0) {
-        if (stopped) mutateQueue(ctxId, () => [])
-        else {
-          const q = queuedRef.current[ctxId]
-          if (q && q.length) {
-            const [next, ...rest] = q
-            mutateQueue(ctxId, () => rest)
-            sendMessageToRef.current(next.text, next.ctx)
-          }
+        const q = queuedRef.current[ctxId]
+        if (q && q.length) {
+          const [next, ...rest] = q
+          mutateQueue(ctxId, () => rest)
+          sendMessageToRef.current(next.text, next.ctx)
         }
       }
     }
@@ -758,16 +800,25 @@ export default function App() {
       }
     }
 
-    // Resolve a failed stream: clear pending and, if still viewing this
-    // conversation, show the optimistic user message + error inline (the error
-    // reply isn't persisted server-side, so only show it where it happened).
+    // Resolve a failed stream: clear pending and, if still viewing this conversation,
+    // show the optimistic user message + the error inline — KEEPING whatever already
+    // streamed (thinking / tool chain / partial text / todos) so a mid-stream error
+    // doesn't wipe the work and force a restart; the error is appended below it.
     function failStream(errText: string) {
       clearPending()
       if (chatIdRef.current === ctxId) {
+        const errored: Message = {
+          ...placeholder,
+          content: accContent ? `${accContent}\n\n${errText}` : errText,
+          parts: parts.length ? parts : undefined,
+          thinking: accThinking || null,
+          todos: todos.length ? todos : undefined,
+          status: 'error' as const,
+          statusMessage: null,
+        }
         setMessages(prev => [
           ...prev.filter(m => m.id !== optimisticUser.id && m.id !== placeholder.id),
-          optimisticUser,
-          { ...placeholder, content: errText, status: 'error' as const, statusMessage: null },
+          optimisticUser, errored,
         ])
       }
     }
@@ -793,12 +844,12 @@ export default function App() {
   }, [sendMessageTo, activeSeedId, activeIdea?.id, viewDomainId, mutateQueue])
 
   // Stop the live reply in the current conversation (the Stop button). Aborts the
-  // stream and clears any queued follow-ups for this context.
+  // current stream; any QUEUED follow-up is kept and sent next (the drain in the
+  // stream's finally handles it) — Stop ends the current reply, not the queue. Remove
+  // a queued item explicitly with its ✕ if you don't want it sent.
   const stopChat = useCallback(() => {
-    const ctxId = chatIdRef.current
-    chatAbort.current[ctxId]?.abort()
-    mutateQueue(ctxId, () => [])
-  }, [mutateQueue])
+    chatAbort.current[chatIdRef.current]?.abort()
+  }, [])
 
   // Load any previously-generated paper when an idea opens (clears otherwise).
   useEffect(() => {
@@ -919,6 +970,7 @@ export default function App() {
         onRemoveIdea={removeIdea}
         onRevealIdea={revealIdea}
         onDuplicateIdea={duplicateIdea}
+        onSetIdeaColor={setIdeaColor}
         onOpenSettings={() => setSettingsOpen(true)}
         onOpenAutoLauncher={() => setAutoLauncherOpen(true)}
         theme={theme}
@@ -957,6 +1009,8 @@ export default function App() {
       <ResourcesPanel
         resources={resources}
         ideaId={activeIdea?.id}
+        domainId={viewDomainId ?? undefined}
+        domains={domains}
         onActivity={onActivity}
         onAgentCommand={sendMessage}
         mapVersion={mapVersion}

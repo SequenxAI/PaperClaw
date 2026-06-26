@@ -101,6 +101,17 @@ class LocalClient:
         if saved is None: raise ClientError("Invalid style name")
         return {"name": saved}
 
+    def benchmarks_list(self, domain_id=None):
+        return service.list_benchmarks(self.store, domain_id)
+    def benchmark_get(self, name, domain_id=None):
+        md = service.get_benchmark(self.store, domain_id, name)
+        if md is None: raise ClientError("Benchmark not found")
+        return {"name": name, "content": md}
+    def benchmark_save(self, name, content, domain_id=None):
+        saved = service.save_benchmark(self.store, name, content, domain_id)
+        if saved is None: raise ClientError("Invalid benchmark name")
+        return {"name": saved}
+
     # Seeds
     def seeds_list(self): return _dump(self.store.list_seeds())
     def seed_add(self, text): return _dump(self.store.add_seed(text))
@@ -140,6 +151,29 @@ class LocalClient:
         spec = self.store.get_spec(idea_id)
         if spec is None: raise ClientError("Idea not found")
         return spec
+    def idea_domains_get(self, idea_id):
+        return service.get_idea_domains(self.store, idea_id)["domainIds"]
+    def idea_domains_set(self, idea_id, domain_ids):
+        return service.set_idea_domains(self.store, idea_id, domain_ids)["domainIds"]
+    def idea_set_color(self, idea_id, color):
+        idea = self.store.set_idea_color(idea_id, color or None)
+        if idea is None:
+            raise ClientError("Idea not found, or invalid color")
+        return _dump(idea)
+    def idea_resources_get(self, idea_id):
+        try:
+            return service.get_idea_resources_view(self.store, self.settings, idea_id)
+        except service.NotFound as exc:
+            raise ClientError(str(exc))
+    def idea_resources_set(self, idea_id, *, experiment_mode=None, ssh_target_id=None,
+                           use_reference_codebase=None):
+        try:
+            service.set_idea_resources(self.store, idea_id, experiment_mode=experiment_mode,
+                                       ssh_target_id=ssh_target_id,
+                                       use_reference_codebase=use_reference_codebase)
+            return service.get_idea_resources_view(self.store, self.settings, idea_id)
+        except service.NotFound as exc:
+            raise ClientError(str(exc))
     def references_list(self, idea_id):
         return _dump(service.get_references(self.store, idea_id))
     def references_add(self, idea_id, doi=None, query=None):
@@ -157,6 +191,16 @@ class LocalClient:
     def hypothesis_delete(self, idea_id, hid):
         try:
             return _dump(service.delete_hypothesis_node(self.store, idea_id, hid))
+        except service.NotFound as exc:
+            raise ClientError(str(exc))
+    def hypothesis_add_child(self, idea_id, parent_hid, statement):
+        try:
+            return _dump(service.add_child_hypothesis(self.store, idea_id, parent_hid, statement))
+        except service.NotFound as exc:
+            raise ClientError(str(exc))
+    def hypothesis_rerun(self, idea_id, hid):
+        try:
+            return service.rerun_hypothesis_experiment(self.store, idea_id, hid)
         except service.NotFound as exc:
             raise ClientError(str(exc))
     def hypothesis_plan(self, idea_id, hid):
@@ -183,12 +227,13 @@ class LocalClient:
             raise ClientError(str(exc))
         except Exception as exc:
             raise ClientError(str(exc))
-    def research_stream(self, idea_id, on_event, restart=False, max_hypotheses=4, page_limit=9):
+    def research_stream(self, idea_id, on_event, restart=False, max_hypotheses=4, page_limit=9,
+                        benchmark=None):
         from paperclaw import iterative_pipeline
         async def _run():
             async for ev in iterative_pipeline.stream_iterative_research_events(
                 self.store, self.settings, idea_id, restart=restart,
-                max_hypotheses=max_hypotheses, page_limit=page_limit,
+                max_hypotheses=max_hypotheses, page_limit=page_limit, benchmark=benchmark,
             ):
                 on_event(ev)
         try:
@@ -367,6 +412,17 @@ class RemoteClient:
         return self._req("POST", "/api/writing-styles",
                          json={"name": name, "content": content, "domainId": domain_id})
 
+    # Benchmark templates
+    def benchmarks_list(self, domain_id=None):
+        q = f"?domainId={domain_id}" if domain_id else ""
+        return self._req("GET", f"/api/benchmarks{q}")
+    def benchmark_get(self, name, domain_id=None):
+        q = f"?domainId={domain_id}" if domain_id else ""
+        return self._req("GET", f"/api/benchmarks/{name}{q}")
+    def benchmark_save(self, name, content, domain_id=None):
+        return self._req("POST", "/api/benchmarks",
+                         json={"name": name, "content": content, "domainId": domain_id})
+
     # Seeds
     def seeds_list(self): return self._req("GET", "/api/brainstorm")
     def seed_add(self, text): return self._req("POST", "/api/brainstorm", json={"text": text})
@@ -398,6 +454,21 @@ class RemoteClient:
     def idea_duplicate(self, idea_id): return self._req("POST", f"/api/ideas/{idea_id}/duplicate")
     def idea_delete(self, idea_id): self._req("DELETE", f"/api/ideas/{idea_id}")
     def idea_spec(self, idea_id): return self._req("GET", f"/api/ideas/{idea_id}/spec")["content"]
+    def idea_domains_get(self, idea_id):
+        return self._req("GET", f"/api/ideas/{idea_id}/domains")["domainIds"]
+    def idea_domains_set(self, idea_id, domain_ids):
+        return self._req("PUT", f"/api/ideas/{idea_id}/domains", {"domainIds": domain_ids})["domainIds"]
+    def idea_set_color(self, idea_id, color):
+        return self._req("PUT", f"/api/ideas/{idea_id}/color", {"color": color or None})
+    def idea_resources_get(self, idea_id):
+        return self._req("GET", f"/api/ideas/{idea_id}/resources")
+    def idea_resources_set(self, idea_id, *, experiment_mode=None, ssh_target_id=None,
+                           use_reference_codebase=None):
+        body = {}
+        if experiment_mode is not None: body["experimentMode"] = experiment_mode
+        if ssh_target_id is not None: body["sshTargetId"] = ssh_target_id
+        if use_reference_codebase is not None: body["useReferenceCodebase"] = use_reference_codebase
+        return self._req("PUT", f"/api/ideas/{idea_id}/resources", body)
     def references_list(self, idea_id):
         return self._req("GET", f"/api/ideas/{idea_id}/references")
     def references_add(self, idea_id, doi=None, query=None):
@@ -414,6 +485,11 @@ class RemoteClient:
         return self._req("GET", f"/api/ideas/{idea_id}/hypotheses/{hid}")
     def hypothesis_delete(self, idea_id, hid):
         return self._req("DELETE", f"/api/ideas/{idea_id}/hypotheses/{hid}")
+    def hypothesis_add_child(self, idea_id, parent_hid, statement):
+        return self._req("POST", f"/api/ideas/{idea_id}/hypotheses/{parent_hid}/children",
+                         {"statement": statement})
+    def hypothesis_rerun(self, idea_id, hid):
+        return self._req("POST", f"/api/ideas/{idea_id}/hypotheses/{hid}/experiment/rerun")
     def hypothesis_plan(self, idea_id, hid):
         return self._req("POST", f"/api/ideas/{idea_id}/hypotheses/{hid}/plan")
     def hypothesis_experiment(self, idea_id, hid):

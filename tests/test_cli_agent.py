@@ -162,7 +162,7 @@ def test_run_cli_agent_waits_grace_for_late_results(tmp_path, monkeypatch):
     evs = _collect(RunConfig(experimentMode="cli", agentCommand=cmd), tmp_path)
 
     deltas = "".join(e["text"] for e in evs if e["type"] == "delta")
-    assert "waiting up to" in deltas  # didn't kill instantly
+    assert "results.json is not written yet" in deltas  # didn't kill instantly
     assert evs[-1]["type"] == "result" and evs[-1]["result"]["error"] is None  # late results.json read
 
 

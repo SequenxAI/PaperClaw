@@ -1,8 +1,8 @@
 import type {
-  BrainstormOptions, ChatContext, Domain, DomainSpec, DoctorReport, HardwareView, Idea, IdeaLocation, IdeaSpec,
+  BrainstormOptions, ChatContext, Domain, DomainSpec, DoctorReport, HardwareView, Idea, IdeaDomains, IdeaResources, IdeaResourcesUpdate, IdeaLocation, IdeaSpec,
   HypothesisDetail, HypothesisMap, Message, PaperContent, ReferencesView, ReferenceValidation,
   Resource, RunConfig, Seed, SSHTarget, SettingsUpdate, SettingsView, Skill, WorkspaceListing,
-  WritingStyle, ExperimentJob, AutoRunStatus
+  WritingStyle, Benchmark, ExperimentJob, AutoRunStatus
 } from './types'
 
 // Packaged desktop app loads from file:// — relative /api paths have no origin
@@ -97,6 +97,8 @@ export const api = {
     request<Idea>('/api/ideas', { method: 'POST', body: JSON.stringify({ title }) }),
   activateIdea: (id: string) =>
     request<Idea>(`/api/ideas/${id}/activate`, { method: 'PUT' }),
+  setIdeaColor: (id: string, color: string | null) =>
+    request<Idea>(`/api/ideas/${id}/color`, { method: 'PUT', body: JSON.stringify({ color }) }),
   duplicateIdea: (id: string) =>
     request<Idea>(`/api/ideas/${id}/duplicate`, { method: 'POST' }),
   deleteIdea: (id: string) =>
@@ -111,6 +113,16 @@ export const api = {
   getSpec: (ideaId: string) => request<IdeaSpec>(`/api/ideas/${ideaId}/spec`),
   putSpec: (ideaId: string, content: string) =>
     request<IdeaSpec>(`/api/ideas/${ideaId}/spec`, { method: 'PUT', body: JSON.stringify({ content }) }),
+
+  // Connect an idea to domains (an idea may connect to several; mounts each under ./domains/<name>)
+  getIdeaDomains: (ideaId: string) => request<IdeaDomains>(`/api/ideas/${ideaId}/domains`),
+  setIdeaDomains: (ideaId: string, domainIds: string[]) =>
+    request<IdeaDomains>(`/api/ideas/${ideaId}/domains`, { method: 'PUT', body: JSON.stringify({ domainIds }) }),
+
+  // Per-idea experiment resource allocation (compute/GPU host; used by auto + manual runs)
+  getIdeaResources: (ideaId: string) => request<IdeaResources>(`/api/ideas/${ideaId}/resources`),
+  setIdeaResources: (ideaId: string, patch: IdeaResourcesUpdate) =>
+    request<IdeaResources>(`/api/ideas/${ideaId}/resources`, { method: 'PUT', body: JSON.stringify(patch) }),
 
   // Generated paper (Markdown for rendering; null content if none yet)
   getPaper: (ideaId: string, version?: number) =>
@@ -147,6 +159,11 @@ export const api = {
     request<HypothesisDetail>(`/api/ideas/${ideaId}/hypotheses/${hid}`),
   deleteHypothesisNode: (ideaId: string, hid: string) =>
     request<HypothesisMap>(`/api/ideas/${ideaId}/hypotheses/${hid}`, { method: 'DELETE' }),
+  addChildHypothesis: (ideaId: string, hid: string, statement: string) =>
+    request<HypothesisMap>(`/api/ideas/${ideaId}/hypotheses/${hid}/children`,
+      { method: 'POST', body: JSON.stringify({ statement }) }),
+  rerunExperiment: (ideaId: string, hid: string) =>
+    request<ExperimentJob>(`/api/ideas/${ideaId}/hypotheses/${hid}/experiment/rerun`, { method: 'POST' }),
   generateHypothesisPlan: (ideaId: string, hid: string) =>
     request<HypothesisDetail>(`/api/ideas/${ideaId}/hypotheses/${hid}/plan`, { method: 'POST' }),
   runHypothesisExperiment: (ideaId: string, hid: string) =>
@@ -173,6 +190,21 @@ export const api = {
     request<WritingStyle[]>(`/api/writing-styles${domainId ? `?domainId=${domainId}` : ''}`),
   saveWritingStyle: (name: string, content: string, domainId?: string) =>
     request<{ name: string }>('/api/writing-styles', {
+      method: 'POST', body: JSON.stringify({ name, content, domainId }) }),
+  // Benchmark templates (fixed protocol + published, cited baselines)
+  getBenchmarks: (domainId?: string) =>
+    request<Benchmark[]>(`/api/benchmarks${domainId ? `?domainId=${domainId}` : ''}`),
+  getBenchmark: (name: string, domainId?: string) =>
+    request<{ name: string; content: string }>(`/api/benchmarks/${encodeURIComponent(name)}${domainId ? `?domainId=${domainId}` : ''}`),
+  // Benchmark templates available to an idea (idea scope + domain + global) — Spec tab picker
+  getIdeaBenchmarks: (ideaId: string) =>
+    request<Benchmark[]>(`/api/ideas/${ideaId}/benchmarks`),
+  // A benchmark for the idea's Benchmark view — a specific name, else the one in force
+  getIdeaBenchmark: (ideaId: string, name?: string) =>
+    request<{ name: string | null; content: string | null }>(
+      `/api/ideas/${ideaId}/benchmark${name ? `?name=${encodeURIComponent(name)}` : ''}`),
+  saveBenchmark: (name: string, content: string, domainId?: string) =>
+    request<{ name: string }>('/api/benchmarks', {
       method: 'POST', body: JSON.stringify({ name, content, domainId }) }),
   // Upload a LaTeX venue template (.zip / .sty / .cls / .tex) into an idea's venue/ dir.
   uploadVenueTemplate: (ideaId: string, filename: string, contentBase64: string) =>
@@ -246,7 +278,7 @@ export const api = {
   startAutoRun: (body: {
     topic?: string; ideaId?: string; positive: number; maxHypotheses: number; pageLimit: number
     maxDepth?: number
-    experimentMode?: string; sshTargetId?: string; writingStyle?: string
+    experimentMode?: string; sshTargetId?: string; writingStyle?: string; benchmark?: string
     useReferenceCodebase?: boolean; fillPage?: boolean
   }) =>
     request<{ ok: boolean; detail: string }>('/api/auto-run/start', { method: 'POST', body: JSON.stringify(body) }),

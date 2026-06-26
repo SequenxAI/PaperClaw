@@ -69,7 +69,11 @@ _TBD_
      bundle of several conditions joined by "and". Avoid superlatives ("largest",
      "best", "always", "on every dataset"): prefer a directional, bounded claim
      that a modest experiment can confirm (a consistent improvement over the
-     baseline is enough). Put distinct facets in SEPARATE hypotheses, not one. -->
+     baseline is enough). Put distinct facets in SEPARATE hypotheses, not one.
+     IDEA-ALIGNED: state each so that "supported" MEANS "the idea works" — confirming
+     it must advance the Main Result, never just establish a true-but-irrelevant side
+     fact. A claim that could hold while the idea still fails is the wrong claim. -->
+
 
 _TBD_
 
@@ -155,15 +159,19 @@ The current IDEA.md spec follows:
 # domain's spec is injected here as read-only reference for its field & literature.
 DOMAIN_REFERENCE_NOTE = """\
 
-## Pinned domain — DOMAIN.md (READ-ONLY reference for this idea)
-This idea's "## Domain & Literature" section pins it to the domain below. DOMAIN.md
-lives at `{domain_path}`, in the SEPARATE domain workspace — which your file tools,
-scoped to THIS idea's folder, cannot open — so it is provided here in full.
-Use its **Crucial Papers** (cite them by their real AUTHORS and YEAR — never leave a
-citation blank), **Datasets / Benchmarks**, **GitHub Libraries**, **Reference
-Codebase**, and **Submission Venues** as the literature/field source while developing
-the idea. You CANNOT edit DOMAIN.md from here — to change the domain spec, open the
-domain chat.
+## Connected domain(s) — READ-ONLY reference
+This idea is connected to the domain(s) below; each one's `DOMAIN.md` is inlined here. Their
+WHOLE folders (`DOMAIN.md`, `codebase/`, `benchmarks/`, prior-run artifacts) live OUTSIDE
+your editable workspace at the absolute path shown for each — read or run them with the
+**`bash`** tool (`cat` / `ls` / `grep` / `python`), NOT `read_file`/`list_files`, which are
+sandboxed to THIS idea's folder and will error on an outside path. Copy anything you need to
+run into the workspace with `bash` (e.g. `cp -r <domain-path>/codebase ./repro`). Use their
+**Crucial Papers** (cite by real AUTHORS and YEAR — never blank), **Datasets / Benchmarks**,
+**GitHub Libraries**, **Reference Codebase**, and **Submission Venues** as the field source.
+**"Benchmark" / "SOTA" = the PUBLISHED, CITED results table** (inlined below if one is in
+force, else under a domain's `benchmarks/`) — when asked to compare to the benchmark, use
+those published numbers, NOT this idea's own experiment results in `hypotheses/<id>/
+results.json`. Do not edit anything in a domain folder — to change a domain spec, open its chat.
 
 """
 
@@ -213,6 +221,14 @@ CRITICAL: stay strictly within the idea's exact field and problem; never drift.
 Each hypothesis is a SCIENTIFIC claim about the method/phenomenon — NEVER a meta /
 engineering claim about the experiment harness ("the pipeline completes", "the code
 runs", "results are recorded"). Those are not hypotheses.
+
+IDEA-ALIGNED — state each hypothesis so that "SUPPORTED" MEANS "THE IDEA WORKS". Every
+root must be LOAD-BEARING for the idea: confirming it directly advances the idea's
+central claim / Main Result, and its failure would undermine the idea. NEVER propose a
+claim that could come back TRUE while the idea still FAILS (a correct-but-irrelevant side
+fact, or a sub-claim that holds in isolation but doesn't move the idea's primary
+outcome). Phrase the prediction in terms of the idea's primary metric/outcome so that
+confirming it is DIRECT evidence the idea works.
 
 SCOPE EACH HYPOTHESIS TO BE WINNABLE — this is essential:
 - One claim = ONE mechanism / ONE prediction. NEVER bundle several conditions with
@@ -726,6 +742,25 @@ Do NOT paste a file's new contents into the chat for the app to save, and do NOT
 emit an ```idea.md``` / ```domain.md``` block for a partial edit — just edit the
 file. Reserve fenced blocks for the protocols that are NOT file edits:
 ```question```, ```new-idea```, and ```new-domain``` (still emit those in text).
+
+You also have a `bash` tool: run shell commands in THIS workspace (conda/venv on PATH) to run
+or re-run scripts (`python run.py`), inspect/grep files, install a package, etc. So you CAN
+execute code here — don't claim you lack a shell.
+
+**Before running an experiment, call `list_exp_resources` FIRST** to see what's available — the
+detected compute (local + any SSH GPU hosts: CPU/GPU/MEM/disk), the experiment-execution mode,
+and the LLM — and decide where/how to run (e.g. use a free GPU host if one is configured).
+
+**Long jobs (training, a full rerun): run them in the BACKGROUND, never block.** A foreground
+`bash` call is capped at 10 min and can't be stopped mid-run. For anything longer, call
+`bash` with `run_in_background=true` — it launches the command DETACHED (it keeps running after
+this turn ends and even survives a backend restart) and returns a **job id** immediately. Then:
+1. Poll it with the `bash_output` tool (pass the job id) to get its status + recent output.
+2. Do NOT sit and wait. If it's still running, REPORT the current progress and END your turn,
+   telling the user to type "continue" to get the next status update — check `bash_output`
+   again at the start of each turn and report until it's done, then read its `results.json`.
+Use `bash_output` with `kill=true` to stop a runaway job. (NEVER background the work in a raw
+`bash` command with `&`/`nohup` yourself — use `run_in_background=true` so it's tracked.)
 
 ## Workspace artifact conventions (the frontend reads these EXACT paths)
 

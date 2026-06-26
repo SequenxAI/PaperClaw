@@ -12,6 +12,7 @@ O **PaperClaw** orquestra agentes autônomos por todo o ciclo de pesquisa —
 ideia, executa experimentos *reais* e escreve um artigo citado e compilado.
 
 [![arXiv](https://img.shields.io/badge/arXiv-2606.22610-b31b1b.svg)](https://arxiv.org/abs/2606.22610)
+[![Discord](https://img.shields.io/badge/Discord-Join%20the%20community-5865F2.svg?logo=discord&logoColor=white)](https://discord.gg/zHAe2y2ej)
 [![License: MIT](https://img.shields.io/badge/License-MIT-E11D48.svg)](../../LICENSE)
 ![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-FB923C.svg)
 ![Backend: FastAPI](https://img.shields.io/badge/Backend-FastAPI-009688.svg)
@@ -176,7 +177,7 @@ pip install -e ".[dev]"
 ```
 
 **Configurar** — o modo local lê a configuração nesta prioridade (da mais alta para a mais baixa):
-**variáveis de ambiente → `.env` (cwd) → `.env` em `$PAPERCLAW_HOME` → `./settings.yaml` (diretório do projeto) → `$PAPERCLAW_HOME/settings.yaml`**.
+**variáveis de ambiente → `.env` (cwd) → `.env` em `$PAPERCLAW_HOME` → `$PAPERCLAW_HOME/settings.yaml` → `./settings.yaml` (diretório do projeto)**.
 
 | Chave | Propósito |
 |---|---|

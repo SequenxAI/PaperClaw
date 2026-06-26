@@ -87,6 +87,11 @@ prior results actually showed; do not repeat an already-settled question. Propos
 SCIENTIFIC claim about the method/phenomenon — NEVER a meta / engineering claim about
 the experiment harness ("the pipeline completes", "the code runs", "results record").
 
+IDEA-ALIGNED — state the claim so that "SUPPORTED" MEANS "THE IDEA WORKS": confirming it
+must advance the idea's central claim / Main Result (e.g. its primary metric improves over
+the baseline as the idea predicts), not merely establish a true-but-irrelevant side fact.
+A claim that could hold while the idea still fails is the wrong claim — reframe it.
+
 Output ONLY a fenced block tagged `hypothesis`:
 
 ```hypothesis
@@ -209,12 +214,17 @@ Output ONLY a fenced block tagged `report`:
 <SUPPORTED | PARTIALLY SUPPORTED | REFUTED | INCONCLUSIVE — for THIS hypothesis,
  grounded in the numbers and judged against the plan's Acceptance Criteria:
  - SUPPORTED: the PRIMARY prediction holds with a consistent, reliable effect —
-   even if MODEST (a few percent is a real, publishable finding). Do NOT downgrade
-   to REFUTED just because the gain is small or doesn't hold in every condition.
+   even if MODEST (a few percent is a real, publishable finding) — AND it advances
+   the IDEA (its central claim / Main Result: e.g. the idea's primary metric improves
+   over the baseline as predicted). Do NOT downgrade to REFUTED just because the gain
+   is small or doesn't hold in every condition.
  - PARTIALLY SUPPORTED: the primary claim holds but some secondary facets don't,
    or it holds on most-but-not-all datasets — still a positive contribution; state
    the caveats.
- - REFUTED: the primary prediction fails — no effect, or the wrong direction.
+ - REFUTED: the primary prediction fails (no effect / wrong direction), OR it holds
+   only as a narrow, isolated sub-claim that does NOT support the idea — i.e. the
+   hypothesis is "technically true" but the idea's central claim / Main Result is not
+   advanced. A confirmation that doesn't make the idea work is a REFUTATION of the idea.
  - INCONCLUSIVE: too noisy / underpowered to tell.>
 
 ## Discussion
@@ -253,7 +263,10 @@ Output ONLY a fenced block tagged `reflection`:
 ## Verdict
 <SUPPORTED | PARTIALLY SUPPORTED | REFUTED | INCONCLUSIVE — for THIS hypothesis,
  against the plan's Acceptance Criteria. A consistent, modest improvement (a few
- percent / a reliable effect) is SUPPORTED — don't demand a large or universal win.>
+ percent / a reliable effect) is SUPPORTED — don't demand a large or universal win.
+ But SUPPORTED also requires that the result ADVANCES THE IDEA (its central claim /
+ Main Result): a claim that comes back true only as an isolated sub-fact, without
+ making the idea work, is REFUTED — not SUPPORTED.>
 
 ## What We Learned
 <the concrete insight, tied to specific results>
@@ -345,10 +358,20 @@ available packages. Output nothing outside the ```latex block.
 # Appended to the EXPERIMENT idea-context when a domain reference codebase is linked
 # in as ./reference, telling the agent to reuse it.
 CODEBASE_NOTE = (
-    "\n\nA reference codebase for this domain is available at ./reference (read-only). "
-    "PREFER reading, importing, or copying its data loaders, model definitions, and "
-    "training/eval loops into your experiment rather than writing everything from "
-    "scratch — adapt the relevant parts to test THIS hypothesis.")
+    "\n\n## Reference codebase — START HERE and REUSE IT (do NOT reimplement)\n"
+    "A WORKING reference implementation for this domain is mounted READ-ONLY at "
+    "`./reference`. It already has this field's data loaders, dataset configs, model "
+    "definitions, and training/evaluation loops. You MUST build the experiment ON TOP of "
+    "it — writing your own training pipeline from scratch is NOT acceptable when "
+    "`./reference` already provides one. Concretely:\n"
+    "1. FIRST inspect it: `ls -R ./reference`, read its README and entry-point / "
+    "train / eval scripts to learn how it loads data, builds the model, and runs.\n"
+    "2. REUSE its components — import them, or copy the needed files into this directory "
+    "(`cp -r ./reference/<...> .`) — and reuse its data loading and metric computation so "
+    "your numbers are directly comparable to the published baselines.\n"
+    "3. Write NEW code ONLY for what THIS hypothesis genuinely adds (e.g. swap in the new "
+    "module / add an ablation flag); adapt the reference's train/eval loop rather than "
+    "rewriting it. In results.json's observations, name which reference components you reused.")
 
 # Appended to the LaTeX paper SYSTEM prompt when the page-fill option is on. Replace
 # `{page_limit}` and `{page_limit_minus_1}` before use.

@@ -46,7 +46,8 @@ def start_auto_run(body: AutoRunStart, request: Request):
         target_positive=body.positive, max_hypotheses=body.max_hypotheses,
         page_limit=body.page_limit, max_depth=body.max_depth,
         experiment_mode=body.experiment_mode, ssh_target_id=body.ssh_target_id,
-        writing_style=body.writing_style, use_reference_codebase=body.use_reference_codebase,
+        writing_style=body.writing_style, benchmark=body.benchmark,
+        use_reference_codebase=body.use_reference_codebase,
         fill_page=body.fill_page)
 
 

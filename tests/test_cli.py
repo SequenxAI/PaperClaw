@@ -49,6 +49,47 @@ def test_local_client_crud_without_llm(tmp_path):
         client.domain_spec("nope")
 
 
+def test_local_client_idea_domains(tmp_path):
+    """`paperclaw idea domains` connects an idea to one or more domains (CLI client path)."""
+    client = LocalClient()
+    d1 = client.domain_create("Time Series")
+    d2 = client.domain_create("Diffusion")
+    i = client.idea_create("My idea")
+    assert client.idea_domains_get(i["id"]) == []                      # none connected yet
+    assert set(client.idea_domains_set(i["id"], [d1["id"], d2["id"]])) == {d1["id"], d2["id"]}
+    assert set(client.idea_domains_get(i["id"])) == {d1["id"], d2["id"]}
+    assert client.idea_domains_set(i["id"], [d1["id"], "bogus"]) == [d1["id"]]   # unknown dropped
+    assert client.idea_domains_set(i["id"], []) == []                  # disconnect all
+
+
+def test_local_client_idea_color(tmp_path):
+    """`paperclaw idea color` flags an idea (green/yellow/grey) and clears it; bad colors reject."""
+    client = LocalClient()
+    i = client.idea_create("My idea")
+    assert client.idea_set_color(i["id"], "green")["color"] == "green"
+    assert client.idea_set_color(i["id"], "")["color"] is None        # cleared
+    with pytest.raises(ClientError):
+        client.idea_set_color(i["id"], "purple")                      # invalid
+    with pytest.raises(ClientError):
+        client.idea_set_color("nope", "green")                        # missing idea
+
+
+def test_local_client_idea_resources(tmp_path):
+    """`paperclaw idea resources` allocates an idea's compute, and the allocation becomes the
+    EFFECTIVE run config every experiment of that idea uses (manual + auto)."""
+    client = LocalClient()
+    st = client.store.get_hardware_state(); st["sshTargets"] = [{"id": "gpu1", "host": "h", "user": "u"}]
+    client.store.save_hardware_state(st)
+    i = client.idea_create("My idea")
+    r = client.idea_resources_get(i["id"])
+    assert "experimentMode" in r and r["llmKeyConfigured"] in (True, False)   # view shape
+    client.idea_resources_set(i["id"], experiment_mode="ssh", ssh_target_id="gpu1")
+    cfg = client.store.effective_run_config(i["id"])                          # what runs will use
+    assert cfg.experiment_mode == "ssh" and cfg.ssh_target_id == "gpu1"
+    # raw key is never surfaced in the view
+    assert "apiKey" not in r and "api_key" not in r
+
+
 def test_local_client_domain_codebase(tmp_path, monkeypatch):
     from paperclaw import codebase
     from pathlib import Path
@@ -63,9 +104,9 @@ def test_local_client_domain_codebase(tmp_path, monkeypatch):
 
     out = client.domain_set_codebase(d["id"], "https://github.com/o/r")
     assert out["codebaseUrl"] == "https://github.com/o/r" and out["codebaseFiles"] == 2
-    # the experiment runner resolves it from a pinned idea
+    # the experiment runner resolves it (name-match fallback when no explicit connection)
     from paperclaw import iterative_pipeline as ip
-    cb = ip._resolve_domain_codebase(client.store,
+    cb = ip._resolve_domain_codebase(client.store, None,
                                      "Domain & Literature: TS Forecasting is the field.")
     assert cb is not None and cb.name == "codebase"
     # clear
@@ -151,20 +192,28 @@ def test_provider_key_fallback(tmp_path, monkeypatch):
     assert settings.api_key == "sk-ant-fallback"
 
 
-def test_project_settings_yaml_overrides_home(tmp_path, monkeypatch):
-    """A settings.yaml in the working directory configures backend+CLI without any
-    commands, and takes precedence over $PAPERCLAW_HOME/settings.yaml."""
+def test_home_settings_yaml_overrides_project_default(tmp_path, monkeypatch):
+    """The persisted $PAPERCLAW_HOME/settings.yaml (written by the UI / `settings set`)
+    OVERRIDES the project-dir ./settings.yaml (a no-command DEFAULT) — so a Settings-UI
+    change actually takes effect on reload. The project file is the fallback when home
+    has none. (Per-key: home overrides only the keys it sets; cwd fills the rest.)"""
     for k in ("PAPERCLAW_PROVIDER", "PAPERCLAW_MODEL", "PAPERCLAW_API_KEY",
               "OPENAI_API_KEY", "ANTHROPIC_API_KEY"):
         monkeypatch.delenv(k, raising=False)
     home = tmp_path / "home"; home.mkdir()
-    (home / "settings.yaml").write_text(
-        "LLM:\n  provider: anthropic\n  model: home-model\n  api_key: sk-home\n")
-    # the autouse fixture chdir'd us into tmp_path, so this IS ./settings.yaml
+    # the autouse fixture chdir'd us into tmp_path, so this IS ./settings.yaml (the default)
     (tmp_path / "settings.yaml").write_text(
-        "LLM:\n  provider: openai\n  model: proj-model\n  api_key: sk-proj\n")
+        "LLM:\n  provider: openai\n  base_url: https://OLD.example/v1\n  model: proj-model\n  api_key: sk-proj\n")
+    # UI saved here → wins
+    (home / "settings.yaml").write_text(
+        "LLM:\n  provider: openai\n  base_url: https://NEW.example/v1\n  model: home-model\n  api_key: sk-home\n")
     s = load_settings(home)
-    assert s.provider == "openai" and s.model == "proj-model" and s.api_key == "sk-proj"
+    assert s.base_url == "https://NEW.example/v1" and s.model == "home-model" and s.api_key == "sk-home"
+
+    # with no home file, the project-dir default is used (fresh setup / CLI from a repo)
+    (home / "settings.yaml").unlink()
+    s2 = load_settings(home)
+    assert s2.base_url == "https://OLD.example/v1" and s2.model == "proj-model"
 
 
 def test_legacy_settings_json_still_read(tmp_path, monkeypatch):

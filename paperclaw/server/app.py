@@ -10,6 +10,7 @@ from paperclaw import __version__
 from paperclaw.config import paperclaw_home, load_settings
 from paperclaw.server.routes import (
     auto,
+    benchmarks,
     brainstorm,
     chat,
     doctor,
@@ -53,6 +54,7 @@ def create_app(home: Path | None = None) -> FastAPI:
     app.include_router(hardware.router)
     app.include_router(doctor.router)
     app.include_router(writing_styles.router)
+    app.include_router(benchmarks.router)
     app.include_router(experiments.router)
     app.include_router(auto.router)
     app.include_router(skills.router)

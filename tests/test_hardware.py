@@ -269,6 +269,76 @@ def test_run_agentic_experiment_multifile(tmp_path, monkeypatch):
     assert data["experiments"][0]["metrics"]["ours"]["acc"] == 1.0  # 0.5 * 2
 
 
+def test_run_agentic_experiment_remote(tmp_path, monkeypatch):
+    """SSH mode: the SAME agentic loop, but bash is dispatched to the remote (here
+    mocked to run locally) and authored files are pushed / results pulled. Asserts the
+    ssh/scp command construction and a normal ssh-provenance result."""
+    import asyncio
+    import subprocess as real_sp
+    from types import SimpleNamespace
+    from paperclaw import agents, llm
+    from paperclaw.agents import coding_agent
+    from paperclaw.config import LLMSettings
+    from paperclaw.server.models import RunConfig
+
+    PY = ('```python\nimport json\n'
+          'open("results.json","w").write(json.dumps({"experiments":[{"name":"t","setup":"s",'
+          '"metrics":{"ours":{"acc":0.9}},"hypothesis":"h","verdict":"SUPPORTED",'
+          '"status":"POSITIVE","observations":"o"}],"summary":"ok"}))\nprint("wrote results")\n```')
+    steps = iter(["Write the script.\n" + PY, "Run it.\n```bash\npython run.py\n```", "DONE"])
+
+    async def fake_llm(settings, system, messages, max_tokens=4096, **kw):
+        yield {"type": "text", "text": next(steps)}
+    monkeypatch.setattr(llm, "stream_chat_thinking", fake_llm)
+
+    orig_run = real_sp.run  # the real subprocess.run, before we patch the module attr
+
+    # record ssh/scp invocations (setup / sync_file / collect) — no real remote
+    ssh_calls = []
+    def fake_run(argv, *a, **kw):
+        ssh_calls.append(argv)
+        return real_sp.CompletedProcess(argv, 0, "", "")
+    monkeypatch.setattr(coding_agent.subprocess, "run", fake_run)
+
+    # the "remote" bash actually runs locally in the workspace (stands in for the box)
+    bash_argvs = []
+    async def fake_stream_argv(argv, cwd, log, header):
+        bash_argvs.append(argv)
+        p = orig_run(["bash", "-c", header], cwd=str(log.parent), capture_output=True, text=True)
+        out = (p.stdout or "") + (p.stderr or "")
+        with log.open("a", encoding="utf-8") as f:
+            f.write(out)
+        yield ("chunk", out)
+        yield ("done", p.returncode, out)
+    monkeypatch.setattr(coding_agent, "_stream_argv", fake_stream_argv)
+
+    target = SimpleNamespace(user="me", host="gpu.box", port=22, key_path=None)
+
+    async def run():
+        result = None
+        async for ev in agents.run_agentic_experiment(
+            LLMSettings(), "idea", "plan", tmp_path / "exp",
+            RunConfig(experimentMode="ssh"), target=target):
+            if ev["type"] == "result":
+                result = ev["result"]
+        return result
+    result = asyncio.run(run())
+
+    exp = tmp_path / "exp"
+    assert result["provenance"] == "ssh" and result["error"] is None
+    assert "SUPPORTED" in result["markdown"]
+    assert (exp / "run.py").is_file() and (exp / "results.json").is_file()  # authored locally
+    # bash dispatched over ssh into the remote working dir (login shell)
+    assert bash_argvs and bash_argvs[0][0] == "ssh"
+    assert any("me@gpu.box" == part for part in bash_argvs[0])
+    assert any("bash -lc" in part and "/tmp/paperclaw_" in part for part in bash_argvs[0])
+    # setup mkdir + scp push of run.py + scp pull of results.json
+    flat = [" ".join(c) for c in ssh_calls]
+    assert any(c.startswith("ssh") and "mkdir -p /tmp/paperclaw_" in c for c in flat)
+    assert any(c.startswith("scp") and "run.py" in c for c in flat)
+    assert any(c.startswith("scp") and "results.json" in c for c in flat)
+
+
 def test_run_cli_agent_streams_and_parses(tmp_path):
     """CLI mode: a fake headless 'agent' command writes results.json; the runner
     streams its stdout live and parses the deliverable. No real CLI / LLM needed."""

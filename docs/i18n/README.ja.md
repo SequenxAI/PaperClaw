@@ -12,6 +12,7 @@
 アイデアを発想し、*本物の*実験を実行し、引用付きでコンパイル済みの論文を書き上げます。
 
 [![arXiv](https://img.shields.io/badge/arXiv-2606.22610-b31b1b.svg)](https://arxiv.org/abs/2606.22610)
+[![Discord](https://img.shields.io/badge/Discord-Join%20the%20community-5865F2.svg?logo=discord&logoColor=white)](https://discord.gg/zHAe2y2ej)
 [![License: MIT](https://img.shields.io/badge/License-MIT-E11D48.svg)](../../LICENSE)
 ![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-FB923C.svg)
 ![Backend: FastAPI](https://img.shields.io/badge/Backend-FastAPI-009688.svg)
@@ -175,7 +176,7 @@ pip install -e ".[dev]"
 ```
 
 **設定** — ローカルモードは次の優先順位（高い順）で設定を読み込みます：
-**環境変数 → `.env`（カレント）→ `$PAPERCLAW_HOME` 内の `.env` → `./settings.yaml`（プロジェクト直下）→ `$PAPERCLAW_HOME/settings.yaml`**。
+**環境変数 → `.env`（カレント）→ `$PAPERCLAW_HOME` 内の `.env` → `$PAPERCLAW_HOME/settings.yaml`→ `./settings.yaml`（プロジェクト直下）**。
 
 | キー | 用途 |
 |---|---|

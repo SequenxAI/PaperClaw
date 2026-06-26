@@ -25,6 +25,10 @@ from typing import AsyncIterator
 
 from paperclaw.config import LLMSettings
 
+# Resilience for the chat model client (a turn makes many calls; endpoints can blip / 5xx).
+_TIMEOUT = 180.0     # seconds per request — generous for slow reasoning models
+_MAX_RETRIES = 4     # retry transient connection errors / 5xx with backoff
+
 
 def available() -> bool:
     """True when the optional dependency is importable."""
@@ -36,12 +40,19 @@ def available() -> bool:
 
 
 def _build_model(settings: LLMSettings):
-    """A LangChain chat model from our settings (Anthropic or OpenAI-compatible)."""
+    """A LangChain chat model from our settings (Anthropic or OpenAI-compatible).
+
+    A workspace chat turn makes MANY model calls (tool loop × rounds), so a single transient
+    network blip / 5xx from the endpoint would otherwise fail the whole turn. We give the
+    client a generous timeout and several retries (with backoff) to ride those out — matching
+    the resilience of `llm.py`'s own httpx path."""
     if (settings.provider or "").lower() == "anthropic":
         from langchain_anthropic import ChatAnthropic
-        return ChatAnthropic(model=settings.model, api_key=settings.api_key, max_tokens=4096)
+        return ChatAnthropic(model=settings.model, api_key=settings.api_key, max_tokens=4096,
+                             max_retries=_MAX_RETRIES, timeout=_TIMEOUT)
     from langchain_openai import ChatOpenAI
-    kw = {"model": settings.model, "api_key": settings.api_key}
+    kw = {"model": settings.model, "api_key": settings.api_key,
+          "max_retries": _MAX_RETRIES, "timeout": _TIMEOUT}
     if settings.base_url:  # custom OpenAI-compatible endpoint
         kw["base_url"] = settings.base_url
     return ChatOpenAI(**kw)
@@ -407,8 +418,49 @@ def _workspace_tools(settings: LLMSettings, base_dir: Path) -> list:
             return f"Review ERROR for {name}: {type(exc).__name__}: {exc}. Check the path/filename and retry."
         return paper_review.format_report(report, name)
 
+    def bash(command: str, run_in_background: bool = False) -> str:
+        """Run a shell command in the workspace (inherits the server's env, so python/conda are
+        on PATH) and return its combined stdout+stderr and exit code. Use it to run scripts,
+        inspect or re-run experiment code (e.g. `python run.py`), list/grep files, install a
+        package, etc. A foreground command is capped at 10 min and CANNOT be interrupted by
+        Stop. For a LONG job (training, a full rerun) pass run_in_background=true: it launches
+        DETACHED, returns a job id immediately, keeps running after this turn / a restart, and
+        you poll it with the `bash_output` tool. Never block waiting on a long job."""
+        from paperclaw.tools import background as _bg
+        if run_in_background:
+            return _bg.launch(base_dir, command)
+        import subprocess
+        try:
+            p = subprocess.run(["bash", "-c", command], cwd=str(base_dir),
+                               capture_output=True, text=True, timeout=600)
+        except subprocess.TimeoutExpired:
+            return ("[timed out after 600s — for a long job pass run_in_background=true "
+                    "(detached, no timeout) and poll with bash_output]")
+        except Exception as exc:
+            return f"[failed to run: {exc}]"
+        out = (p.stdout or "") + (("\n[stderr]\n" + p.stderr) if p.stderr else "")
+        out = out[-8000:].strip()  # last 8k chars
+        return f"(exit {p.returncode})\n{out}" if out else f"(exit {p.returncode}, no output)"
+
+    def bash_output(job_id: str = "", lines: int = 40, kill: bool = False) -> str:
+        """Check a background job started by bash(run_in_background=true): its status (running /
+        done+exit-code / stopped) and recent output. Pass the job_id you got back; omit it to
+        list ALL jobs; set kill=true to stop one. Report run progress with this instead of
+        blocking — if a job is still running, end your turn and check again next time."""
+        from paperclaw.tools import background as _bg
+        return _bg.status(base_dir, job_id=job_id.strip() or None, lines=lines, kill=kill)
+
+    def list_exp_resources() -> str:
+        """List the experiment resources available BEFORE running one: detected compute (local +
+        any SSH remotes — CPU/GPU/MEM/disk), the experiment-execution mode + coding-agent CLI,
+        and the LLM provider/model. Call this FIRST when about to run an experiment, to decide
+        where (local vs an SSH GPU host) and how to run it. (Keys shown as configured/missing.)"""
+        from paperclaw.tools import list_exp_resources as _ler
+        return _ler.execute(base_dir, {})
+
     return [_make_figure_tool(settings, base_dir), web_search, openalex_search, cite,
-            fetch_url, download_file, read_image, read_pdf, compile_latex, review_paper]
+            fetch_url, download_file, read_image, read_pdf, compile_latex, review_paper,
+            bash, bash_output, list_exp_resources]
 
 
 def _update_messages(data):

@@ -14,7 +14,11 @@ from paperclaw.server.models import (
     HypothesisDetail,
     HypothesisMap,
     Idea,
+    IdeaDomains,
+    IdeaDomainsUpdate,
     IdeaLocation,
+    IdeaResources,
+    IdeaResourcesUpdate,
     IdeaSpec,
     PaperContent,
     PhasePartial,
@@ -35,6 +39,10 @@ class IdeaCreate(BaseModel):
 
 class SpecUpdate(BaseModel):
     content: str
+
+
+class ChildHypothesis(BaseModel):
+    statement: str
 
 
 class AutoResearchRequest(BaseModel):
@@ -67,6 +75,19 @@ def activate_idea(idea_id: str, request: Request):
     idea = request.app.state.store.set_active_idea(idea_id)
     if idea is None:
         raise HTTPException(status_code=404, detail="Idea not found")
+    return idea
+
+
+class IdeaColor(BaseModel):
+    color: str | None = None
+
+
+@router.put("/{idea_id}/color", response_model=Idea)
+def set_idea_color(idea_id: str, body: IdeaColor, request: Request):
+    """Flag an idea with a sidebar colour (green | yellow | grey | null to clear)."""
+    idea = request.app.state.store.set_idea_color(idea_id, body.color)
+    if idea is None:
+        raise HTTPException(status_code=404, detail="Idea not found, or invalid color")
     return idea
 
 
@@ -119,11 +140,68 @@ def get_spec(idea_id: str, request: Request):
     return IdeaSpec(ideaId=idea_id, content=content)
 
 
+@router.get("/{idea_id}/benchmarks")
+def list_idea_benchmarks(idea_id: str, request: Request):
+    """Benchmark templates available to this idea (idea scope + its domain + global) —
+    the Spec tab → Benchmark picker."""
+    return service.list_idea_benchmarks(request.app.state.store, idea_id)
+
+
+@router.get("/{idea_id}/benchmark")
+def get_idea_benchmark(idea_id: str, request: Request, name: str | None = None):
+    """A benchmark for the Spec tab → Benchmark view — a specific ``name`` (idea > domain
+    > global) or, with none, the one in force. {"name": <title|None>, "content": <md|None>}."""
+    return service.get_idea_benchmark(request.app.state.store, idea_id, name)
+
+
 @router.put("/{idea_id}/spec", response_model=IdeaSpec)
 def put_spec(idea_id: str, body: SpecUpdate, request: Request):
     if not request.app.state.store.put_spec(idea_id, body.content):
         raise HTTPException(status_code=404, detail="Idea not found")
     return IdeaSpec(ideaId=idea_id, content=body.content)
+
+
+@router.get("/{idea_id}/domains", response_model=IdeaDomains)
+def get_idea_domains(idea_id: str, request: Request):
+    """The domains this idea is connected to (the Spec-tab domain connector)."""
+    try:
+        return service.get_idea_domains(request.app.state.store, idea_id)
+    except service.NotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+
+@router.put("/{idea_id}/domains", response_model=IdeaDomains)
+def set_idea_domains(idea_id: str, body: IdeaDomainsUpdate, request: Request):
+    """Connect the idea to a set of domains (mounts each under ./domains/<name>)."""
+    try:
+        return service.set_idea_domains(request.app.state.store, idea_id, body.domain_ids)
+    except service.NotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+
+@router.get("/{idea_id}/resources", response_model=IdeaResources)
+def get_idea_resources(idea_id: str, request: Request):
+    """The idea's allocated experiment resources (compute + active LLM) for the Resources sub-tab."""
+    try:
+        return service.get_idea_resources_view(
+            request.app.state.store, request.app.state.settings, idea_id)
+    except service.NotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+
+@router.put("/{idea_id}/resources", response_model=IdeaResources)
+def set_idea_resources(idea_id: str, body: IdeaResourcesUpdate, request: Request):
+    """Allocate the idea's experiment resources — used by every experiment of this idea (auto
+    or manual from the Hypotheses tab)."""
+    try:
+        service.set_idea_resources(
+            request.app.state.store, idea_id,
+            experiment_mode=body.experiment_mode, ssh_target_id=body.ssh_target_id,
+            use_reference_codebase=body.use_reference_codebase)
+        return service.get_idea_resources_view(
+            request.app.state.store, request.app.state.settings, idea_id)
+    except service.NotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
 
 
 @router.post("/{idea_id}/save-phase-partial", status_code=204)
@@ -317,6 +395,27 @@ def start_experiment_job(idea_id: str, hypothesis_id: str, request: Request):
     try:
         return jobs.start_experiment_job(request.app.state.store, idea_id, hypothesis_id)
     except (FileNotFoundError, ValueError) as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+
+@router.post("/{idea_id}/hypotheses/{hypothesis_id}/experiment/rerun", response_model=ExperimentJob)
+def rerun_experiment(idea_id: str, hypothesis_id: str, request: Request):
+    """Re-run / retest a hypothesis: clear its experiment + verdict artifacts, reset it to
+    untested, and start a fresh detached job (right-click → Rerun, e.g. for an inconclusive one)."""
+    try:
+        return service.rerun_hypothesis_experiment(request.app.state.store, idea_id, hypothesis_id)
+    except service.NotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+
+@router.post("/{idea_id}/hypotheses/{hypothesis_id}/children", response_model=HypothesisMap)
+def add_child_hypothesis(idea_id: str, hypothesis_id: str, body: ChildHypothesis, request: Request):
+    """Add a sub-hypothesis under this node (right-click → Add sub-hypothesis)."""
+    if not body.statement.strip():
+        raise HTTPException(status_code=422, detail="statement is required")
+    try:
+        return service.add_child_hypothesis(request.app.state.store, idea_id, hypothesis_id, body.statement)
+    except service.NotFound as exc:
         raise HTTPException(status_code=404, detail=str(exc))
 
 

@@ -12,6 +12,7 @@
 eine Idee, führt *echte* Experimente aus und schreibt ein zitiertes, kompiliertes Paper.
 
 [![arXiv](https://img.shields.io/badge/arXiv-2606.22610-b31b1b.svg)](https://arxiv.org/abs/2606.22610)
+[![Discord](https://img.shields.io/badge/Discord-Join%20the%20community-5865F2.svg?logo=discord&logoColor=white)](https://discord.gg/zHAe2y2ej)
 [![License: MIT](https://img.shields.io/badge/License-MIT-E11D48.svg)](../../LICENSE)
 ![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-FB923C.svg)
 ![Backend: FastAPI](https://img.shields.io/badge/Backend-FastAPI-009688.svg)
@@ -177,7 +178,7 @@ pip install -e ".[dev]"
 ```
 
 **Konfigurieren** — der lokale Modus liest die Konfiguration in dieser Priorität (höchste zuerst):
-**Umgebungsvariablen → `.env` (cwd) → `.env` in `$PAPERCLAW_HOME` → `./settings.yaml` (Projektverzeichnis) → `$PAPERCLAW_HOME/settings.yaml`**.
+**Umgebungsvariablen → `.env` (cwd) → `.env` in `$PAPERCLAW_HOME` → `$PAPERCLAW_HOME/settings.yaml` → `./settings.yaml` (Projektverzeichnis)**.
 
 | Schlüssel | Zweck |
 |---|---|

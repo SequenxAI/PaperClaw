@@ -370,6 +370,22 @@ class Store:
                 self._save_idea(idea)
         return found
 
+    _IDEA_COLORS = (None, "green", "yellow", "grey")
+
+    def set_idea_color(self, idea_id: str, color: str | None) -> Idea | None:
+        """Flag an idea with a sidebar colour (green | yellow | grey | None to clear)."""
+        if color == "":
+            color = None
+        if color not in self._IDEA_COLORS:
+            return None
+        d = self._idea_dir(idea_id)
+        if not (d / "idea.json").is_file():
+            return None
+        idea = Idea.model_validate_json((d / "idea.json").read_text())
+        idea.color = color
+        self._save_idea(idea)
+        return idea
+
     def remove_idea(self, idea_id: str) -> bool:
         d = self._idea_dir(idea_id)
         if not d.is_dir():
@@ -388,6 +404,32 @@ class Store:
         if not d.is_dir():
             return False
         (d / "IDEA.md").write_text(content)
+        return True
+
+    # ── Domain pins (.domains.json = the idea's connected domains) ───────────
+    def get_idea_domain_ids(self, idea_id: str) -> list[str] | None:
+        """The idea's EXPLICITLY-connected domain ids (order preserved), or None if the
+        idea was never explicitly connected (caller then falls back to name-matching)."""
+        path = self._idea_dir(idea_id) / ".domains.json"
+        if not path.is_file():
+            return None
+        try:
+            data = json.loads(path.read_text())
+        except (OSError, ValueError):
+            return None
+        return [str(x) for x in data] if isinstance(data, list) else None
+
+    def set_idea_domain_ids(self, idea_id: str, ids: list[str]) -> bool:
+        """Persist the idea's connected domain ids (dedup, order-preserving). Empty list
+        writes `[]` (an explicit 'no domains'), distinct from never-connected (no file)."""
+        d = self._idea_dir(idea_id)
+        if not d.is_dir():
+            return False
+        seen: list[str] = []
+        for x in ids:
+            if x and x not in seen:
+                seen.append(x)
+        (d / ".domains.json").write_text(json.dumps(seen))
         return True
 
     # ── References (ref.bib) ───────────────────────────────
@@ -492,6 +534,9 @@ class Store:
         created_idea_id: str | None = None,
         created_domain_id: str | None = None,
         question: dict | None = None,
+        thinking: str | None = None,
+        parts: list[dict] | None = None,
+        todos: list[dict] | None = None,
     ) -> Message:
         msgs = self.list_messages(idea_id)
         msg = Message(
@@ -508,6 +553,9 @@ class Store:
             createdIdeaId=created_idea_id,
             createdDomainId=created_domain_id,
             question=question,
+            thinking=thinking or None,
+            parts=parts or None,
+            todos=todos or None,
         )
         msgs.append(msg)
         path = self._messages_path(idea_id)
@@ -562,6 +610,42 @@ class Store:
         state = self.get_hardware_state()
         state["runConfig"] = cfg.model_dump(by_alias=True)
         self.save_hardware_state(state)
+
+    # ── Per-idea resource allocation (.resources.json) ─────────────────────────
+    # An idea can pin WHERE its experiments run (compute mode + SSH GPU host); these
+    # override the global run config for every experiment of that idea (auto OR manual),
+    # so different ideas can run on different GPUs in parallel.
+    def get_idea_resources(self, idea_id: str) -> dict | None:
+        """The idea's saved resource allocation ({experimentMode?, sshTargetId?,
+        useReferenceCodebase?}), or None if it was never set."""
+        path = self._idea_dir(idea_id) / ".resources.json"
+        if not path.is_file():
+            return None
+        try:
+            data = json.loads(path.read_text())
+        except (OSError, ValueError):
+            return None
+        return data if isinstance(data, dict) else None
+
+    def set_idea_resources(self, idea_id: str, resources: dict) -> bool:
+        d = self._idea_dir(idea_id)
+        if not d.is_dir():
+            return False
+        (d / ".resources.json").write_text(json.dumps(resources))
+        return True
+
+    def effective_run_config(self, idea_id: str) -> RunConfig:
+        """The global run config with the idea's allocation applied on top — the EFFECTIVE
+        config every experiment of this idea should use (auto + manual). Falls back to the
+        global config for any field the idea didn't pin."""
+        cfg = self.get_run_config()
+        alloc = self.get_idea_resources(idea_id) or {}
+        mode = alloc.get("experimentMode")
+        if mode in ("simulated", "executed", "ssh", "cli"):
+            cfg.experiment_mode = mode
+        if "sshTargetId" in alloc:
+            cfg.ssh_target_id = alloc.get("sshTargetId") or None
+        return cfg
 
     # ── Auto-mode run status ────────────────────────────────────────────────
     # `paperclaw auto` streams its phase progress to the launching terminal;
